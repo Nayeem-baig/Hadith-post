@@ -33,7 +33,7 @@ export async function GET(request: Request) {
     const html = await response.text();
     return NextResponse.json({ ok: true, html });
   } catch (error) {
-    console.error("Sunnah extraction proxy failed:", error);
+    console.error("Sunnah extraction route failed:", error);
     return NextResponse.json({ ok: false, error: "Could not fetch the page." }, { status: 502 });
   }
 }

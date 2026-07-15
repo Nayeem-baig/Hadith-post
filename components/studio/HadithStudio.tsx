@@ -851,26 +851,6 @@ export function HadithStudio() {
       renderPreview();
     }
 
-    async function fetchViaProxies(targetUrl: string) {
-      const encoded = encodeURIComponent(targetUrl);
-      const proxies = [
-        `https://api.allorigins.win/raw?url=${encoded}`,
-        `https://api.codetabs.com/v1/proxy?quest=${encoded}`,
-        `https://corsproxy.io/?url=${encoded}`
-      ];
-      for (const proxyUrl of proxies) {
-        try {
-          const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(15000) });
-          if (!res.ok) continue;
-          const text = await res.text();
-          if (text && text.length > 500 && /arabic_hadith_full|text_details/.test(text)) return text;
-        } catch {
-          /* try next proxy */
-        }
-      }
-      return null;
-    }
-
     async function fetchViaServerExtractor(targetUrl: string) {
       try {
         const response = await fetch(`/api/extract?url=${encodeURIComponent(targetUrl)}`, { cache: "no-store" });
@@ -1353,9 +1333,9 @@ export function HadithStudio() {
         extractBtn.disabled = true;
         setExtractStatus("Fetching…");
         try {
-          const html = (await fetchViaServerExtractor(url)) || (await fetchViaProxies(url));
+          const html = await fetchViaServerExtractor(url);
           if (!html) {
-            setExtractStatus('Could not fetch the page from here (likely blocked by the browser). Use "paste HTML source" below instead.', "error");
+            setExtractStatus('Could not fetch the page from here. Use "paste HTML source" below instead.', "error");
             const section = document.getElementById("pasteHtmlSection") as HTMLElement | null;
             if (section) section.style.display = "block";
             return;
