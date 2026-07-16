@@ -11,7 +11,7 @@ function mongoUri() {
   const user = process.env.MONGO_USER;
   const password = process.env.MONGO_PASSWORD;
   if (!user || !password) return null;
-  return `mongodb+srv://${encodeURIComponent(user)}:${encodeURIComponent(password)}@hadith.mwypj9r.mongodb.net/hadith?appName=Hadith&retryWrites=true&w=majority`;
+  return `mongodb+srv://${encodeURIComponent(user)}:${encodeURIComponent(password)}@hadith.mwypj9r.mongodb.net/?appName=Hadith&retryWrites=true&w=majority&tls=true`;
 }
 
 export async function getMongoClient() {
@@ -20,11 +20,24 @@ export async function getMongoClient() {
   if (!global.__mongoClientPromise) {
     global.__mongoClientPromise = new MongoClient(uri, {
       serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
       tls: true
     }).connect();
   }
-  global.__mongoClient = await global.__mongoClientPromise;
-  return global.__mongoClient;
+  try {
+    global.__mongoClient = await global.__mongoClientPromise;
+    return global.__mongoClient;
+  } catch (error) {
+    global.__mongoClient = undefined;
+    global.__mongoClientPromise = undefined;
+    const message = error instanceof Error ? error.message : String(error);
+    if (/SSL routines|tlsv1 alert internal error|ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR/i.test(message)) {
+      throw new Error(
+        "MongoDB Atlas connection failed during TLS negotiation. In Atlas, add your current IP to the project's Network Access/IP Access List; for Vercel, allow the deployment egress IP or temporarily use 0.0.0.0/0 while testing."
+      );
+    }
+    throw error;
+  }
 }
 
 export async function getDb(databaseName = "hadith") : Promise<Db> {

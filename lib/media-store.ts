@@ -39,6 +39,7 @@ export async function saveMediaSource(source: string) {
 }
 
 export async function getMediaSource(id: string) {
+  if (/^https?:\/\//i.test(id) || id.startsWith("data:")) return id;
   const db = await openDb();
   const source = await new Promise<string | null>((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");

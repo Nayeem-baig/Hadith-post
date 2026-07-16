@@ -10,7 +10,13 @@ export async function uploadBlobToCloudinary(params: {
   const baseName = segments[segments.length - 1] || params.fileName;
   const publicId = baseName.replace(/\.[^.]+$/u, "");
   const formData = new FormData();
-  formData.append("file", params.blob, params.fileName);
+  const uploadFile =
+    typeof File !== "undefined" && params.blob instanceof File
+      ? params.blob
+      : typeof File !== "undefined"
+        ? new File([params.blob], params.fileName, { type: params.contentType || "application/octet-stream" })
+        : params.blob;
+  formData.append("file", uploadFile, params.fileName);
   formData.append("folder", folder);
   formData.append("publicId", publicId);
   formData.append("contentType", params.contentType);

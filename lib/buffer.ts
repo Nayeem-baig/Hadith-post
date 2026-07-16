@@ -156,6 +156,10 @@ export async function createBufferPost(input: {
     };
   }>;
   metadata?: {
+    instagram?: {
+      type?: "post" | "story" | "reel";
+      shouldShareToFeed?: boolean;
+    };
     youtube?: {
       title?: string;
       categoryId?: string;

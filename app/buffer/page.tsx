@@ -23,6 +23,15 @@ function formatBufferStatus(status?: string) {
   return status.toLowerCase();
 }
 
+type ChannelSettings = {
+  instagramTypes?: Array<"post" | "story" | "reel">;
+  youtubeCategory?: string;
+};
+
+function defaultInstagramTypes(mediaKind?: string) {
+  return (mediaKind === "video" ? ["reel"] : ["post"]) as Array<"post" | "story" | "reel">;
+}
+
 export default function BufferPage() {
   const { db, ready } = useStudioDb();
   const [bootstrap, setBootstrap] = useState<BufferBootstrapResponse>({
@@ -34,11 +43,14 @@ export default function BufferPage() {
   const [loading, setLoading] = useState(true);
   const [organizationId, setOrganizationId] = useState("");
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
+  const [channelSettings, setChannelSettings] = useState<Record<string, ChannelSettings>>({});
   const [title, setTitle] = useState("");
   const [caption, setCaption] = useState("");
   const [tags, setTags] = useState("");
   const [category, setCategory] = useState("");
   const [scheduledAt, setScheduledAt] = useState("");
+  const [selectedHashtagGroupId, setSelectedHashtagGroupId] = useState("");
+  const [selectedAudioId, setSelectedAudioId] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -46,6 +58,13 @@ export default function BufferPage() {
   const pendingProjectId = typeof window !== "undefined" ? window.localStorage.getItem("hadith-studio-buffer-pending-project") : null;
   const pendingProject = db.projects.find((project) => project.id === pendingProjectId);
   const preparedMedia = pendingProject?.buffer;
+  const hashtagGroups = db.hashtags;
+  const audioAssets = useMemo(
+    () => db.assets.filter((asset) => asset.kind === "audio").sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt)),
+    [db.assets]
+  );
+  const selectedHashtagGroup = hashtagGroups.find((group) => group.id === selectedHashtagGroupId);
+  const selectedAudioAsset = audioAssets.find((asset) => asset.id === selectedAudioId);
 
   const postsByStatus = useMemo(() => {
     return {
@@ -63,6 +82,26 @@ export default function BufferPage() {
     setTags((current) => current || (pendingProject.hashtags || []).join(", "));
     setCategory((current) => current || pendingProject.buffer?.category || "");
   }, [pendingProject]);
+
+  useEffect(() => {
+    if (!hashtagGroups.length) return;
+    const pendingGroupId = typeof window !== "undefined" ? window.localStorage.getItem("hadith-studio-pending-hashtag-group") : null;
+    const exactGroup =
+      pendingProject?.hashtags?.length && hashtagGroups.find((group) => group.hashtags.length === pendingProject.hashtags.length && group.hashtags.every((tag) => pendingProject.hashtags.includes(tag)));
+    const nextGroup = hashtagGroups.find((group) => group.id === pendingGroupId) || exactGroup;
+    if (nextGroup) setSelectedHashtagGroupId(nextGroup.id);
+  }, [hashtagGroups, pendingProject]);
+
+  useEffect(() => {
+    if (!selectedHashtagGroup) return;
+    setTags(selectedHashtagGroup.hashtags.join(", "));
+  }, [selectedHashtagGroup]);
+
+  useEffect(() => {
+    if (!selectedAudioAsset || typeof window === "undefined") return;
+    window.localStorage.setItem("hadith-studio-pending-audio", selectedAudioAsset.sourceUrl);
+    window.localStorage.setItem("hadith-studio-pending-audio-name", selectedAudioAsset.name);
+  }, [selectedAudioAsset]);
 
   useEffect(() => {
     let active = true;
@@ -97,6 +136,7 @@ export default function BufferPage() {
 
   useEffect(() => {
     setSelectedChannelIds([]);
+    setChannelSettings({});
   }, [organizationId]);
 
   useEffect(() => {
@@ -104,14 +144,44 @@ export default function BufferPage() {
     setSelectedChannelIds((current) => (current.length ? current : bootstrap.channels.map((channel) => channel.id)));
   }, [bootstrap.channels]);
 
+  useEffect(() => {
+    if (!bootstrap.channels.length) return;
+    setChannelSettings((current) => {
+      const next = { ...current };
+      for (const channel of bootstrap.channels) {
+        if (next[channel.id]) continue;
+        const service = channel.service.toLowerCase();
+        next[channel.id] = {
+          instagramTypes: service.includes("instagram") ? defaultInstagramTypes(preparedMedia?.mediaKind) : undefined,
+          youtubeCategory: service.includes("youtube") ? (preparedMedia?.category || "") : undefined
+        };
+      }
+      return next;
+    });
+  }, [bootstrap.channels, preparedMedia?.category, preparedMedia?.mediaKind]);
+
   function toggleChannel(id: string) {
     setSelectedChannelIds((current) =>
       current.includes(id) ? current.filter((channelId) => channelId !== id) : [...current, id]
     );
+    const channel = bootstrap.channels.find((item) => item.id === id);
+    if (!channel) return;
+    setChannelSettings((current) => ({
+      ...current,
+      [id]: current[id] || {
+        instagramTypes: channel.service.toLowerCase().includes("instagram") ? defaultInstagramTypes(preparedMedia?.mediaKind) : undefined,
+        youtubeCategory: channel.service.toLowerCase().includes("youtube") ? (preparedMedia?.category || "") : undefined
+      }
+    }));
   }
 
   function selectedChannels() {
     return bootstrap.channels.filter((channel) => selectedChannelIds.includes(channel.id));
+  }
+
+  function formatDuration(duration?: number) {
+    if (!duration || Number.isNaN(duration)) return "0.0s";
+    return `${duration.toFixed(1)}s`;
   }
 
   async function publishToBuffer(saveToDraft = false) {
@@ -138,7 +208,12 @@ export default function BufferPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         organizationId,
-        channels: selectedChannels().map((channel) => ({ id: channel.id, service: channel.service })),
+        channels: selectedChannels().map((channel) => ({
+          id: channel.id,
+          service: channel.service,
+          instagramTypes: channelSettings[channel.id]?.instagramTypes,
+          youtubeCategory: channelSettings[channel.id]?.youtubeCategory || category.trim() || preparedMedia.category
+        })),
         title: nextTitle,
         caption: nextCaption,
         category: category.trim() || preparedMedia.category,
@@ -190,8 +265,70 @@ export default function BufferPage() {
               {bootstrap.configured ? "Buffer is configured." : "Buffer is not configured."}
             </div>
             {preparedMedia?.mediaUrl ? (
-              <div className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-xs text-[var(--text-dim)]">
-                Prepared media: {preparedMedia.mediaKind || "image"} · {preparedMedia.fileName || "export"}
+              <div className="overflow-hidden rounded-md border border-[var(--panel-border)] bg-[#0d1116]">
+                <div className="border-b border-[var(--panel-border)] px-3 py-2 text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">
+                  Export preview
+                </div>
+                <div className="bg-black/60">
+                  {preparedMedia.mediaKind === "video" ? (
+                    <video src={preparedMedia.mediaUrl} controls autoPlay muted loop playsInline className="aspect-[9/16] w-full object-contain" />
+                  ) : (
+                    <img src={preparedMedia.mediaUrl} alt={preparedMedia.fileName || "Export preview"} className="aspect-[9/16] w-full object-contain" />
+                  )}
+                </div>
+                <div className="space-y-2 px-3 py-3 text-xs text-[var(--text-dim)]">
+                  <div>
+                    Prepared media: <span className="text-[#e8e8e8]">{preparedMedia.mediaKind || "image"}</span> ·{" "}
+                    <span className="text-[#e8e8e8]">{preparedMedia.fileName || "export"}</span>
+                  </div>
+                  {selectedHashtagGroup ? (
+                    <div className="rounded-md border border-[var(--panel-border)] bg-[#11161d] px-2 py-1 text-[11px]">
+                      <div className="uppercase tracking-[0.08em] text-[var(--text-dim)]">Hashtag group</div>
+                      <div className="text-[#e8e8e8]">{selectedHashtagGroup.name}</div>
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {selectedHashtagGroup.hashtags.map((tag) => (
+                          <span key={tag} className="rounded-full border border-[var(--panel-border)] px-2 py-0.5 text-[10px]">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {tags.trim() ? (
+                    <div className="text-[#e8e8e8]">
+                      <div className="uppercase tracking-[0.08em] text-[var(--text-dim)]">Buffer tags</div>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {tags
+                          .split(/,|\n/)
+                          .map((tag) => tag.trim())
+                          .filter(Boolean)
+                          .map((tag) => (
+                            <span key={tag} className="rounded-full border border-[var(--panel-border)] px-2 py-0.5 text-[10px]">
+                              {tag}
+                            </span>
+                          ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {pendingProject?.audioTracks?.length ? (
+                    <div className="space-y-1">
+                      <div className="uppercase tracking-[0.08em] text-[var(--text-dim)]">Audio used in export</div>
+                      <div className="space-y-1">
+                        {pendingProject.audioTracks.map((track) => (
+                          <div key={track.id} className="rounded-md border border-[var(--panel-border)] bg-[#11161d] px-2 py-1 text-[11px]">
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="truncate text-[#e8e8e8]">{track.name}</span>
+                              <span>{formatDuration(track.duration)}</span>
+                            </div>
+                            <div className="text-[10px] text-[var(--text-dim)]">
+                              Starts at {formatDuration(track.start)} · Trim {formatDuration(track.trimStart)}–{formatDuration(track.trimEnd)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ) : null}
             {error ? <div className="rounded-md border border-[#7d2b2b] bg-[#2a1010] px-3 py-2 text-sm text-[#ffb4b4]">{error}</div> : null}
@@ -213,21 +350,123 @@ export default function BufferPage() {
             </label>
             <Input placeholder="Title" value={title} onChange={(event) => setTitle(event.target.value)} />
             <Textarea placeholder="Caption" value={caption} onChange={(event) => setCaption(event.target.value)} className="min-h-28" />
-            <Input placeholder="Tags, comma separated" value={tags} onChange={(event) => setTags(event.target.value)} />
+            <label className="space-y-2 text-sm">
+              <span className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Hashtag group</span>
+              <select
+                className="w-full rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 outline-none"
+                value={selectedHashtagGroupId}
+                onChange={(event) => setSelectedHashtagGroupId(event.target.value)}
+              >
+                <option value="">Custom tags</option>
+                {hashtagGroups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name} · {group.hashtags.length} tags
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Textarea
+              placeholder="Tags, comma separated"
+              value={tags}
+              onChange={(event) => {
+                setSelectedHashtagGroupId("");
+                setTags(event.target.value);
+              }}
+              className="min-h-24"
+            />
+            <label className="space-y-2 text-sm">
+              <span className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Audio reuse</span>
+              <select
+                className="w-full rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 outline-none"
+                value={selectedAudioId}
+                onChange={(event) => setSelectedAudioId(event.target.value)}
+              >
+                <option value="">Select saved audio</option>
+                {audioAssets.map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.name} · {formatDuration(asset.duration)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedAudioAsset ? (
+              <div className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-xs text-[var(--text-dim)]">
+                Selected audio: <span className="text-[#e8e8e8]">{selectedAudioAsset.name}</span> · {formatDuration(selectedAudioAsset.duration)}
+              </div>
+            ) : null}
             <Input placeholder="Category" value={category} onChange={(event) => setCategory(event.target.value)} />
             <Input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} />
             <div className="space-y-2 rounded-md border border-[var(--panel-border)] bg-[#0d1116] p-3">
               <div className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Channels</div>
               <div className="space-y-2">
                 {bootstrap.channels.map((channel) => (
-                  <label key={channel.id} className="flex items-center gap-3 rounded-md border border-[var(--panel-border)] bg-[#11161d] px-3 py-2 text-sm">
-                    <input type="checkbox" checked={selectedChannelIds.includes(channel.id)} onChange={() => toggleChannel(channel.id)} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">{channel.displayName || channel.name}</span>
-                      <span className="block text-xs text-[var(--text-dim)]">{channel.service}</span>
-                    </span>
-                    {channel.isQueuePaused ? <Badge className="bg-[#3a2626] text-[#ffb4b4]">Paused</Badge> : <Badge>Active</Badge>}
-                  </label>
+                  <div key={channel.id} className="rounded-md border border-[var(--panel-border)] bg-[#11161d] px-3 py-2 text-sm">
+                    <label className="flex items-center gap-3">
+                      <input type="checkbox" checked={selectedChannelIds.includes(channel.id)} onChange={() => toggleChannel(channel.id)} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">{channel.displayName || channel.name}</span>
+                        <span className="block text-xs text-[var(--text-dim)]">{channel.service}</span>
+                      </span>
+                      {channel.isQueuePaused ? <Badge className="bg-[#3a2626] text-[#ffb4b4]">Paused</Badge> : <Badge>Active</Badge>}
+                    </label>
+                    {selectedChannelIds.includes(channel.id) && channel.service.toLowerCase().includes("instagram") ? (
+                      <div className="mt-3 space-y-2">
+                        <span className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Instagram type</span>
+                        <div className="grid gap-2 sm:grid-cols-3">
+                          {(["post", "story", "reel"] as const).map((instagramType) => {
+                            const selectedTypes = channelSettings[channel.id]?.instagramTypes || defaultInstagramTypes(preparedMedia?.mediaKind);
+                            const checked = selectedTypes.includes(instagramType);
+                            return (
+                              <label
+                                key={instagramType}
+                                className={`flex cursor-pointer items-center justify-between rounded-md border px-3 py-2 text-sm transition ${
+                                  checked
+                                    ? "border-[#c9ad6d] bg-[#1a160f] text-[#f4e2b4]"
+                                    : "border-[var(--panel-border)] bg-[#0d1116] text-[var(--text-dim)]"
+                                }`}
+                              >
+                                <span>{instagramType.charAt(0).toUpperCase() + instagramType.slice(1)}</span>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={(event) =>
+                                    setChannelSettings((current) => {
+                                      const currentTypes = current[channel.id]?.instagramTypes || defaultInstagramTypes(preparedMedia?.mediaKind);
+                                      const nextTypes = event.target.checked
+                                        ? Array.from(new Set([...currentTypes, instagramType]))
+                                        : currentTypes.filter((value) => value !== instagramType);
+                                      return {
+                                        ...current,
+                                        [channel.id]: {
+                                          ...current[channel.id],
+                                          instagramTypes: nextTypes.length ? nextTypes : defaultInstagramTypes(preparedMedia?.mediaKind)
+                                        }
+                                      };
+                                    })
+                                  }
+                                />
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedChannelIds.includes(channel.id) && channel.service.toLowerCase().includes("youtube") ? (
+                      <label className="mt-3 block space-y-2">
+                        <span className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">YouTube category</span>
+                        <Input
+                          placeholder="People & Blogs"
+                          value={channelSettings[channel.id]?.youtubeCategory || category}
+                          onChange={(event) =>
+                            setChannelSettings((current) => ({
+                              ...current,
+                              [channel.id]: { ...current[channel.id], youtubeCategory: event.target.value }
+                            }))
+                          }
+                        />
+                      </label>
+                    ) : null}
+                  </div>
                 ))}
                 {!bootstrap.channels.length && !loading ? <div className="text-sm text-[var(--text-dim)]">No channels loaded.</div> : null}
               </div>

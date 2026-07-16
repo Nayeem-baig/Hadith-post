@@ -2,8 +2,13 @@ import { NextResponse } from "next/server";
 import { ensureCloudinaryConfigured, cloudinaryReady } from "@/lib/cloudinary";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-function toBuffer(file: File) {
+function isBlobLike(value: unknown): value is Blob {
+  return Boolean(value) && typeof value === "object" && typeof (value as Blob).arrayBuffer === "function";
+}
+
+function toBuffer(file: Blob) {
   return file.arrayBuffer().then((buffer) => Buffer.from(buffer));
 }
 
@@ -13,13 +18,15 @@ export async function POST(request: Request) {
   }
 
   const formData = await request.formData().catch(() => null);
-  const file = formData?.get("file");
+  const fileEntry = formData?.get("file");
   const folder = String(formData?.get("folder") || "buffer");
   const publicId = String(formData?.get("publicId") || `upload-${Date.now()}`);
   const resourceType = String(formData?.get("resourceType") || "auto") as "auto" | "image" | "video";
   const contentType = String(formData?.get("contentType") || "");
 
-  if (!(file instanceof File)) {
+  const file = isBlobLike(fileEntry) ? fileEntry : null;
+
+  if (!file) {
     return NextResponse.json({ ok: false, error: "Missing upload file." }, { status: 400 });
   }
 

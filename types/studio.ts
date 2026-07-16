@@ -2,6 +2,15 @@ export type ExportFormat = "png" | "video";
 export type ProjectStatus = "Draft" | "Exported" | "Scheduled" | "Published" | "Favorites";
 export type AssetKind = "background" | "audio" | "template";
 
+export interface MediaPlacement {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  opacity: number;
+  fit: "cover" | "contain";
+}
+
 export interface TemplateDefinition {
   id: string;
   name: string;
@@ -26,6 +35,8 @@ export interface TextStyle {
   lineHeight: number;
   paragraphSpacing: number;
   color: string;
+  offsetX?: number;
+  offsetY?: number;
 }
 
 export interface AudioTrack {
@@ -86,6 +97,7 @@ export interface HadithProject {
   background?: string;
   backgroundKind?: "image" | "video";
   backgroundRef?: string;
+  backgroundPlacement?: MediaPlacement;
   caption: string;
   hashtags: string[];
   exportSettings: {
@@ -98,8 +110,9 @@ export interface HadithProject {
     watermarkSize: number;
     watermarkPosition: "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
     watermarkText: string;
+    watermarkStyle: TextStyle;
   };
-  styles: Record<"eyebrow" | "arabic" | "english" | "source", TextStyle>;
+  styles: Record<"eyebrow" | "arabic" | "english" | "source" | "watermark", TextStyle>;
   audioTracks: AudioTrack[];
   buffer?: BufferPostDetails;
   versions: ProjectVersionSnapshot[];
@@ -122,6 +135,7 @@ export interface AssetRecord {
   storagePath?: string;
   fileSize?: number;
   duration?: number;
+  mediaKind?: "image" | "video" | "audio";
   favorite: boolean;
   createdAt: string;
   updatedAt: string;

@@ -8,8 +8,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { TEMPLATES, TPL_BY_ID, ARABIC_FONTS, ENGLISH_FONTS, fontCss, H, W } from "@/lib/studio-data";
 import { createDefaultEditorState, createProjectFromEditor, editorFromProject, type EditorState } from "@/lib/project";
 import { getMediaSource, saveMediaSource } from "@/lib/media-store";
-import { createInitialDb, fetchStudioDb, readLocalDb, readLocalDbSnapshot, upsertProject, writeLocalDb } from "@/lib/persistence";
+import { createInitialDb, fetchStudioDb, readLocalDb, readLocalDbSnapshot, upsertAsset, upsertProject, writeLocalDb } from "@/lib/persistence";
 import { uploadBlobToCloudinary } from "@/lib/cloudinary-upload";
+import type { AssetKind, AssetRecord, MediaPlacement } from "@/types/studio";
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] || ch));
@@ -37,6 +38,8 @@ export function HadithStudio() {
     let previewPlaying = false;
     let sharedAudioContext: AudioContext | null = null;
     let previewAudioSources: AudioBufferSourceNode[] = [];
+    let mediaPlacementSelected = false;
+    let textPlacementSelectedKey: keyof EditorState["styles"] | null = null;
     let scrollDebounce: ReturnType<typeof setTimeout> | undefined;
     let autosaveTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -197,7 +200,10 @@ export function HadithStudio() {
       state.bgImage = media;
       state.background = source;
       state.backgroundKind = kind;
-      state.backgroundRef = ref || (await saveMediaSource(source));
+      state.backgroundRef = ref || (/^https?:\/\//i.test(source) || source.startsWith("data:") ? source : await saveMediaSource(source));
+      if (!state.backgroundPlacement) {
+        state.backgroundPlacement = { x: 0, y: 0, width: 1, height: 1, opacity: 1, fit: "cover" };
+      }
     }
 
     function updateHint() {
@@ -300,6 +306,35 @@ export function HadithStudio() {
       ctx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
     }
 
+    function drawMediaInRect(img: HTMLImageElement | HTMLVideoElement, rect: MediaPlacement, time = 0) {
+      ctx.save();
+      const iw = img instanceof HTMLVideoElement ? img.videoWidth || img.width : img.naturalWidth || img.width;
+      const ih = img instanceof HTMLVideoElement ? img.videoHeight || img.height : img.naturalHeight || img.height;
+      const x = rect.x * W;
+      const y = rect.y * H;
+      const width = rect.width * W;
+      const height = rect.height * H;
+      const scale = rect.fit === "contain" ? Math.min(width / iw, height / ih) : Math.max(width / iw, height / ih);
+      const dw = iw * scale;
+      const dh = ih * scale;
+      const dx = x + (width - dw) / 2;
+      const dy = y + (height - dh) / 2;
+      if (img instanceof HTMLVideoElement) {
+        const duration = Number.isFinite(img.duration) && img.duration > 0 ? img.duration : state.duration;
+        const loopTime = duration > 0 ? time % duration : time;
+        if (img.readyState >= 1 && Math.abs(img.currentTime - loopTime) > 0.08) {
+          try {
+            img.currentTime = loopTime;
+          } catch {
+            /* ignore seek race */
+          }
+        }
+      }
+      ctx.globalAlpha *= rect.opacity;
+      ctx.drawImage(img, dx, dy, dw, dh);
+      ctx.restore();
+    }
+
     function drawBackground(tplId: string, zoom = 1, time = 0) {
       const tpl = TPL_BY_ID[tplId];
       if (tpl.kind === "radial") {
@@ -318,26 +353,14 @@ export function HadithStudio() {
         ctx.fillStyle = "#111";
         ctx.fillRect(0, 0, W, H);
         const bg = state.bgImage as HTMLImageElement | HTMLVideoElement | null;
-        if (bg instanceof HTMLVideoElement) {
-          const duration = Number.isFinite(bg.duration) && bg.duration > 0 ? bg.duration : state.duration;
-          const loopTime = duration > 0 ? time % duration : time;
-          if (bg.readyState >= 1 && Math.abs(bg.currentTime - loopTime) > 0.08) {
-            try {
-              bg.currentTime = loopTime;
-            } catch {
-              /* ignore seek race */
-            }
+        if (bg) {
+          const placement = state.backgroundPlacement || { x: 0, y: 0, width: 1, height: 1, opacity: 1, fit: "cover" };
+          if (bg instanceof HTMLVideoElement) {
+            if (bg.readyState >= 2) drawMediaInRect(bg, placement, time);
+          } else {
+            drawMediaInRect(bg, placement, time);
           }
-          if (bg.readyState >= 2) drawCoverImage(bg, W, H, zoom);
-        } else if (bg) {
-          drawCoverImage(bg, W, H, zoom);
         }
-        const overlay = ctx.createLinearGradient(0, 0, 0, H);
-        overlay.addColorStop(0, "rgba(0,0,0,.55)");
-        overlay.addColorStop(0.4, "rgba(0,0,0,.35)");
-        overlay.addColorStop(1, "rgba(0,0,0,.65)");
-        ctx.fillStyle = overlay;
-        ctx.fillRect(0, 0, W, H);
       }
       if (tpl.pattern) drawGeometricOverlay(tpl.accent || "#c9a24b");
     }
@@ -416,20 +439,22 @@ export function HadithStudio() {
       return countLines(blocks) * effectiveLineHeight(lineHeight, paragraphSpacing) + Math.max(0, blocks.length - 1) * paragraphSpacing;
     }
 
-    function fallbackColor(key: "eyebrow" | "arabic" | "english" | "source") {
-      return { eyebrow: "#e6cd8a", arabic: "#e6cd8a", english: "#eae2cc", source: "#9fb3c8" }[key];
+    function fallbackColor(key: "eyebrow" | "arabic" | "english" | "source" | "watermark") {
+      return { eyebrow: "#e6cd8a", arabic: "#e6cd8a", english: "#eae2cc", source: "#9fb3c8", watermark: "#ffffff" }[key];
     }
 
-    function resolveTextColor(key: "eyebrow" | "arabic" | "english" | "source", tpl: (typeof TPL_BY_ID)[string]) {
-      return state.styles[key].color || tpl[key] || fallbackColor(key);
+    function resolveTextColor(key: "eyebrow" | "arabic" | "english" | "source" | "watermark", tpl: (typeof TPL_BY_ID)[string]) {
+      const templateColors = tpl as unknown as Record<string, string | undefined>;
+      return state.styles[key].color || templateColors[key] || fallbackColor(key);
     }
 
     function textAnchorX(style: EditorState["styles"]["eyebrow"]) {
       const left = 110;
       const right = W - 110;
-      if (style.align === "left") return left + style.indent;
-      if (style.align === "right") return right - style.indent;
-      return W / 2 + style.indent;
+      const offsetX = style.offsetX || 0;
+      if (style.align === "left") return left + style.indent + offsetX;
+      if (style.align === "right") return right - style.indent + offsetX;
+      return W / 2 + style.indent + offsetX;
     }
 
     function drawUnderline(text: string, x: number, y: number, style: EditorState["styles"]["eyebrow"], lineHeight: number) {
@@ -457,7 +482,7 @@ export function HadithStudio() {
       ctx.textAlign = style.align;
       const x = textAnchorX(style);
       const lineAdvance = effectiveLineHeight(lineHeight, style.paragraphSpacing);
-      let y = startY;
+      let y = startY + (style.offsetY || 0);
       for (let i = 0; i < blocks.length; i++) {
         const paragraph = blocks[i];
         for (const line of paragraph) {
@@ -472,6 +497,65 @@ export function HadithStudio() {
       }
       ctx.direction = "ltr";
       return y;
+    }
+
+    function measureBlockWidth(blocks: string[][], font: string) {
+      ctx.font = font;
+      let maxWidth = 0;
+      for (const paragraph of blocks) {
+        for (const line of paragraph) {
+          maxWidth = Math.max(maxWidth, ctx.measureText(line).width);
+        }
+      }
+      return maxWidth;
+    }
+
+    function buildTextPlacements(layout: ReturnType<typeof buildLayout>, animation?: ReturnType<typeof animationFrameState>) {
+      const anim = animation || { mode: "none", progress: 1, contentY: 0 };
+      const startY = (H - layout.totalHeight) / 2 + (anim.contentY || 0);
+      const placements: Array<{
+        key: keyof EditorState["styles"];
+        blocks: string[][];
+        style: EditorState["styles"][keyof EditorState["styles"]];
+        font: string;
+        lineHeight: number;
+        top: number;
+        width: number;
+        height: number;
+      }> = [];
+
+      let y = startY;
+      const pushPlacement = (
+        key: keyof EditorState["styles"],
+        blocks: string[][],
+        style: EditorState["styles"][typeof key],
+        font: string,
+        lineHeight: number
+      ) => {
+        const width = Math.max(220, measureBlockWidth(blocks, font) + 32);
+        const height = Math.max(lineHeight, textBlockHeight(blocks, lineHeight, style.paragraphSpacing) + 18);
+        placements.push({ key, blocks, style, font, lineHeight, top: y, width, height });
+        y += textBlockHeight(blocks, lineHeight, style.paragraphSpacing);
+      };
+
+      if (layout.eyebrowBlocks.length) {
+        pushPlacement("eyebrow", layout.eyebrowBlocks, state.styles.eyebrow, layout.fonts.eyebrowFont, layout.eyebrowLH);
+        if (layout.hasArabic || layout.hasEnglish || layout.hasSource) y += 50;
+      }
+      if (layout.arabicBlocks.length) {
+        pushPlacement("arabic", layout.arabicBlocks, state.styles.arabic, layout.fonts.arabicFont, layout.arabicLH);
+        if (layout.showDivider) y += 56 + 2 + 56;
+        else if (layout.hasEnglish || layout.hasSource) y += 34;
+      }
+      if (layout.englishBlocks.length) {
+        pushPlacement("english", layout.englishBlocks, state.styles.english, layout.fonts.englishFont, layout.englishLH);
+        if (layout.hasSource) y += 60;
+      }
+      if (layout.sourceBlocks.length) {
+        pushPlacement("source", layout.sourceBlocks, state.styles.source, layout.fonts.sourceFont, layout.sourceLH);
+      }
+
+      return placements;
     }
 
     function animationFrameState(t: number) {
@@ -550,7 +634,6 @@ export function HadithStudio() {
       const tpl = TPL_BY_ID[state.template];
       const cx = W / 2;
       const anim = animation || { mode: "none", progress: 1, contentY: 0 };
-      let y = (H - layout.totalHeight) / 2 + (anim.contentY || 0);
       const stages: Record<string, [number, number]> = { eyebrow: [0, 0.12], arabic: [0.08, 0.4], divider: [0.38, 0.46], english: [0.42, 0.7], source: [0.68, 0.82] };
       const reveal = (stage: keyof typeof stages) => {
         if (anim.mode === "none" || anim.mode === "slowZoom") return 1;
@@ -562,33 +645,36 @@ export function HadithStudio() {
         return easeOutCubic((eased - s) / (e - s));
       };
 
-      if (layout.eyebrowBlocks.length) {
+      const placements = buildTextPlacements(layout, animation);
+
+      const eyebrow = placements.find((item) => item.key === "eyebrow");
+      const arabic = placements.find((item) => item.key === "arabic");
+      const english = placements.find((item) => item.key === "english");
+      const source = placements.find((item) => item.key === "source");
+
+      if (eyebrow) {
         ctx.globalAlpha = reveal("eyebrow");
-        y = drawTextBlock(layout.eyebrowBlocks, state.styles.eyebrow, layout.fonts.eyebrowFont, resolveTextColor("eyebrow", tpl), y, layout.eyebrowLH, "ltr");
-        if (layout.hasArabic || layout.hasEnglish || layout.hasSource) y += 50;
+        drawTextBlock(eyebrow.blocks, state.styles.eyebrow, layout.fonts.eyebrowFont, resolveTextColor("eyebrow", tpl), eyebrow.top, layout.eyebrowLH, "ltr");
       }
-      if (layout.arabicBlocks.length) {
+      if (arabic) {
         ctx.globalAlpha = reveal("arabic");
-        y = drawTextBlock(layout.arabicBlocks, state.styles.arabic, layout.fonts.arabicFont, resolveTextColor("arabic", tpl), y, layout.arabicLH, "rtl");
-        if (layout.showDivider) y += 56;
-        else if (layout.hasEnglish || layout.hasSource) y += 34;
+        drawTextBlock(arabic.blocks, state.styles.arabic, layout.fonts.arabicFont, resolveTextColor("arabic", tpl), arabic.top, layout.arabicLH, "rtl");
       }
       if (layout.showDivider) {
+        const dividerTop = (arabic?.top || (H - layout.totalHeight) / 2) + (arabic ? arabic.height : 0) + 56;
         const dividerReveal = reveal("divider");
         const actualDividerW = 180 * dividerReveal;
         ctx.globalAlpha = dividerReveal > 0 ? 1 : 0;
         ctx.fillStyle = resolveTextColor("arabic", tpl);
-        ctx.fillRect(cx - actualDividerW / 2, y, actualDividerW, 2);
-        y += 2 + 56;
+        ctx.fillRect(cx - actualDividerW / 2, dividerTop, actualDividerW, 2);
       }
-      if (layout.englishBlocks.length) {
+      if (english) {
         ctx.globalAlpha = reveal("english");
-        y = drawTextBlock(layout.englishBlocks, state.styles.english, layout.fonts.englishFont, resolveTextColor("english", tpl), y, layout.englishLH, "ltr");
-        if (layout.hasSource) y += 60;
+        drawTextBlock(english.blocks, state.styles.english, layout.fonts.englishFont, resolveTextColor("english", tpl), english.top, layout.englishLH, "ltr");
       }
-      if (layout.sourceBlocks.length) {
+      if (source) {
         ctx.globalAlpha = reveal("source");
-        y = drawTextBlock(layout.sourceBlocks, state.styles.source, layout.fonts.sourceFont, resolveTextColor("source", tpl), y, layout.sourceLH, "ltr");
+        drawTextBlock(source.blocks, state.styles.source, layout.fonts.sourceFont, resolveTextColor("source", tpl), source.top, layout.sourceLH, "ltr");
       }
       ctx.globalAlpha = 1;
     }
@@ -603,16 +689,28 @@ export function HadithStudio() {
       drawContent(layout, progress, animation);
       if (state.watermark.enabled && state.watermark.text.trim()) {
         const tpl = TPL_BY_ID[state.template];
+        const style = state.styles.watermark;
         const alpha = state.watermark.opacity;
+        const font = `${style.italic ? "italic " : ""}${style.bold ? "700 " : "500 "}${style.size}px "${state.watermark.font}", Jost, sans-serif`;
+        const fill = style.color || tpl.accent || "#ffffff";
+        const blocks = wrapTextBlocks(state.watermark.text, W - 140, font);
+        const lineHeight = style.size * style.lineHeight;
+        const totalHeight = textBlockHeight(blocks, lineHeight, style.paragraphSpacing);
+        const x = state.watermark.position.includes("left") ? 60 : state.watermark.position.includes("right") ? W - 60 : W / 2;
+        const startY = state.watermark.position.includes("top")
+          ? 70 - lineHeight
+          : state.watermark.position.includes("bottom")
+            ? H - 70 - totalHeight
+            : H / 2 - totalHeight / 2 - lineHeight;
         targetCtx.save();
         targetCtx.globalAlpha = alpha;
-        targetCtx.fillStyle = tpl.accent || "#c9a24b";
-        targetCtx.font = `${state.watermark.opacity > 0.5 ? "600" : "500"} ${state.watermark.size}px "${state.watermark.font}", Jost, sans-serif`;
-        targetCtx.textAlign = state.watermark.position.includes("left") ? "left" : state.watermark.position.includes("right") ? "right" : "center";
-        targetCtx.textBaseline = "middle";
-        const x = state.watermark.position.includes("left") ? 60 : state.watermark.position.includes("right") ? W - 60 : W / 2;
-        const y = state.watermark.position.includes("top") ? 70 : state.watermark.position.includes("bottom") ? H - 70 : H / 2;
-        targetCtx.fillText(state.watermark.text, x, y);
+        targetCtx.fillStyle = fill;
+        targetCtx.strokeStyle = fill;
+        targetCtx.font = font;
+        targetCtx.textAlign = style.align;
+        targetCtx.textBaseline = "alphabetic";
+        targetCtx.direction = "ltr";
+        drawTextBlock(blocks, style, font, fill, startY, lineHeight, "ltr");
         targetCtx.restore();
       }
       ctx = previousCtx;
@@ -626,6 +724,8 @@ export function HadithStudio() {
     function renderPreview() {
       stopPreviewPlayback(false);
       renderFrame(ctx, 1, 1.06, { mode: "none", progress: 1, zoom: 1.06, contentY: 0 }, 0);
+      renderMediaPlacementOverlay();
+      renderTextPlacementOverlay();
       updateHint();
       rememberActiveProject();
     }
@@ -710,6 +810,63 @@ export function HadithStudio() {
       });
     }
 
+    function renderAudioLibraryPicker(sourceDb: ReturnType<typeof readLocalDb>) {
+      const select = document.getElementById("audioLibrarySelect") as HTMLSelectElement | null;
+      const loadBtn = document.getElementById("audioLibraryLoadBtn") as HTMLButtonElement | null;
+      if (!select || !loadBtn) return;
+      const audioAssets = sourceDb.assets
+        .filter((asset) => asset.kind === "audio")
+        .sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt));
+      select.innerHTML = `<option value="">Choose saved audio</option>${audioAssets
+        .map((asset) => `<option value="${asset.id}">${escapeHtml(asset.name)} · ${formatSeconds(asset.duration || 0)}</option>`)
+        .join("")}`;
+      loadBtn.disabled = !audioAssets.length;
+      loadBtn.textContent = audioAssets.length ? "Use saved audio" : "No saved audio";
+
+      const loadSelectedAudio = async () => {
+        const selected = sourceDb.assets.find((asset) => asset.id === select.value);
+        if (!selected) return;
+        try {
+          const audioCtx = getAudioContext();
+          await resumeAudioContext(audioCtx);
+          const buffer = await audioCtx.decodeAudioData(await (await fetch(selected.sourceUrl)).arrayBuffer());
+          state.audioTracks.push({
+            id: `audio-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            name: selected.name,
+            buffer,
+            duration: buffer.duration,
+            start: 0,
+            trimStart: 0,
+            trimEnd: buffer.duration,
+            volume: 1,
+            fadeIn: 0,
+            fadeOut: 0,
+            enabled: true,
+            sourceUrl: selected.sourceUrl,
+            storagePath: selected.storagePath,
+            mimeType: selected.metadata.type?.toString()
+          });
+          stopPreviewPlayback(true);
+          renderAudioTracks();
+          renderPreview();
+          persistProject("Draft");
+        } catch (error) {
+          console.error("Saved audio reuse failed:", error);
+          alert("Could not load that saved audio.");
+        }
+      };
+
+      if (select.dataset.bound !== "1") {
+        select.addEventListener("change", () => {
+          loadBtn.disabled = !select.value;
+        });
+        loadBtn.addEventListener("click", () => {
+          void loadSelectedAudio();
+        });
+        select.dataset.bound = "1";
+      }
+    }
+
     async function scheduleAudioTracks(audioCtx: AudioContext, destination: AudioNode | MediaStreamAudioDestinationNode, startDelay: number) {
       const sources: AudioBufferSourceNode[] = [];
       const baseTime = audioCtx.currentTime + (startDelay || 0);
@@ -789,7 +946,8 @@ export function HadithStudio() {
         document.fonts.load(fontCss(arabicDef, state.styles.arabic.size, state.styles.arabic)),
         document.fonts.load(fontCss(englishDef, state.styles.english.size, state.styles.english)),
         document.fonts.load(`${state.styles.eyebrow.italic ? "italic " : ""}${state.styles.eyebrow.bold ? "700 " : "500 "}${state.styles.eyebrow.size}px "Jost"`),
-        document.fonts.load(`${state.styles.source.italic ? "italic " : ""}${state.styles.source.bold ? "700 " : "400 "}${state.styles.source.size}px "Jost"`)
+        document.fonts.load(`${state.styles.source.italic ? "italic " : ""}${state.styles.source.bold ? "700 " : "400 "}${state.styles.source.size}px "Jost"`),
+        document.fonts.load(`${state.styles.watermark.italic ? "italic " : ""}${state.styles.watermark.bold ? "700 " : "400 "}${state.styles.watermark.size}px "${state.watermark.font}", Jost`)
       ]);
     }
 
@@ -824,13 +982,70 @@ export function HadithStudio() {
         });
         result.source = refText + (inbookText ? ` (${inbookText})` : "");
       }
+      if (!result.arabic && !result.english) {
+        const markdown = parseSunnahMarkdown(html);
+        result.eyebrow = result.eyebrow || markdown.eyebrow;
+        result.arabic = result.arabic || markdown.arabic;
+        result.english = result.english || markdown.english;
+        result.source = result.source || markdown.source;
+      }
+      return result;
+    }
+
+    function parseSunnahMarkdown(content: string) {
+      const result = { eyebrow: "", arabic: "", english: "", source: "" };
+      const normalized = content.replace(/\r/g, "\n");
+      const titleLine = normalized.match(/^Title:\s*(.+)$/m)?.[1]?.trim() || "";
+      const titleRoot = titleLine.replace(/\s*-\s*Sunnah\.com\s*$/i, "").trim();
+      const titleParts = titleRoot.split(/\s+-\s+/).map((part) => part.trim()).filter(Boolean);
+      if (titleParts[0]) result.source = titleParts[0];
+      if (titleParts[1]) result.eyebrow = titleParts[1];
+      const markdownContent = normalized.includes("Markdown Content:")
+        ? normalized.slice(normalized.indexOf("Markdown Content:") + "Markdown Content:".length)
+        : normalized;
+      const lines = markdownContent
+        .split("\n")
+        .map((line) => cleanText(line))
+        .filter(Boolean)
+        .filter((line) => !/^URL Source:/i.test(line));
+
+      const isArabic = (line: string) => /[\u0600-\u06FF]/.test(line);
+      const isNoiseLine = (line: string) =>
+        /^(Select Collections|Show More Collections|Quotes\b|Wildcards\b|Fuzzy Search\b|Term Boosting\b|Boolean Operators\b|More \.\.\.)$/i.test(line) ||
+        line === "×";
+
+      const arabicStart = lines.findIndex((line) => isArabic(line) && !isNoiseLine(line));
+      if (arabicStart >= 0) {
+        let arabicEnd = arabicStart;
+        while (arabicEnd < lines.length) {
+          const line = lines[arabicEnd];
+          if (!line || isNoiseLine(line) || /^(\*{1,2})?(Reference|In-book reference|Source)\b/i.test(line)) break;
+          if (!isArabic(line) && arabicEnd > arabicStart) break;
+          arabicEnd += 1;
+        }
+        result.arabic = lines.slice(arabicStart, arabicEnd).join(" ").trim();
+        const englishStart = arabicEnd;
+        const englishLines: string[] = [];
+        for (let index = englishStart; index < lines.length; index += 1) {
+          const line = lines[index];
+          if (isNoiseLine(line) || /^(\*{1,2})?(Reference|In-book reference|Source)\b/i.test(line)) break;
+          if (!line || isArabic(line)) continue;
+          englishLines.push(line);
+          if (englishLines.join(" ").length > 30 && /[.!?]["')\]]?$/.test(line)) break;
+        }
+        result.english = englishLines.join(" ").trim();
+      }
+
+      if (!result.eyebrow && titleParts[1]) {
+        result.eyebrow = titleParts[1];
+      }
       return result;
     }
 
     function applyExtraction(result: { eyebrow: string; arabic: string; english: string; source: string }) {
       if (result.eyebrow) {
         state.eyebrow = result.eyebrow;
-        const input = document.getElementById("eyebrowInput") as HTMLInputElement | null;
+        const input = document.getElementById("eyebrowInput") as HTMLTextAreaElement | null;
         if (input) input.value = result.eyebrow;
       }
       if (result.arabic) {
@@ -897,10 +1112,11 @@ export function HadithStudio() {
 
     function currentEditorColor(key: keyof EditorState["styles"]) {
       const tpl = TPL_BY_ID[state.template];
-      return state.styles[key].color || (tpl[key] as string) || fallbackColor(key as never);
+      const templateColors = tpl as unknown as Record<string, string | undefined>;
+      return state.styles[key].color || templateColors[key] || fallbackColor(key);
     }
 
-    function buildStyleEditor(key: keyof EditorState["styles"], mountId: string, title: string, colorKey: keyof typeof TPL_BY_ID[string]) {
+    function buildStyleEditor(key: keyof EditorState["styles"], mountId: string, title: string, colorKey: keyof EditorState["styles"]) {
       const style = state.styles[key];
       const mount = document.getElementById(mountId);
       if (!mount) return;
@@ -961,6 +1177,7 @@ export function HadithStudio() {
       buildStyleEditor("arabic", "arabicEditor", "Arabic style", "arabic");
       buildStyleEditor("english", "englishEditor", "English style", "english");
       buildStyleEditor("source", "sourceEditor", "Source style", "source");
+      buildStyleEditor("watermark", "watermarkEditor", "Watermark style", "watermark");
     }
 
     function setSelectedDuration(val: number, scrollTo: boolean) {
@@ -1064,6 +1281,294 @@ export function HadithStudio() {
           console.error("Pending hashtag reuse failed:", error);
         }
       }
+    }
+
+    function clampPlacement(placement?: MediaPlacement): MediaPlacement {
+      const current = placement || { x: 0, y: 0, width: 1, height: 1, opacity: 1, fit: "cover" };
+      const width = Math.min(Math.max(current.width, 0.08), 1);
+      const height = Math.min(Math.max(current.height, 0.08), 1);
+      return {
+        x: Math.min(Math.max(current.x, 0), 1 - width),
+        y: Math.min(Math.max(current.y, 0), 1 - height),
+        width,
+        height,
+        opacity: Math.min(Math.max(current.opacity, 0.05), 1),
+        fit: current.fit || "cover"
+      };
+    }
+
+    function saveUploadedAsset(asset: AssetRecord) {
+      studioDbSnapshot = upsertAsset(studioDbSnapshot, asset);
+      writeLocalDb(studioDbSnapshot);
+    }
+
+    function renderTemplateGrid(sourceDb: ReturnType<typeof readLocalDb>) {
+      const userTemplateAssets = sourceDb.assets.filter((asset) => asset.kind === "template" || asset.kind === "background");
+      const templateGrid = document.getElementById("templateGrid");
+      if (!templateGrid) return;
+      templateGrid.innerHTML = "";
+      [...templateOptions, ...userTemplateAssets.map((asset) => ({ id: asset.id, name: asset.name, kind: "image" as const, sourceUrl: asset.sourceUrl, asset }))].forEach((tpl) => {
+        const el = document.createElement("div");
+        const isAssetTemplate = "asset" in tpl;
+        const isActive = isAssetTemplate
+          ? state.template === "custom" && (state.backgroundRef === tpl.asset.storagePath || state.background === tpl.sourceUrl)
+          : tpl.id === state.template;
+        el.className = `template-swatch${isActive ? " active" : ""}`;
+        el.dataset.tpl = tpl.id;
+        if ("asset" in tpl) {
+          const kind = tpl.asset.mediaKind === "video" || tpl.asset.metadata.type?.toString().startsWith("video/") ? "video" : "image";
+          el.style.background = kind === "video" ? "#111" : `center / cover no-repeat url('${tpl.sourceUrl}')`;
+          el.innerHTML = kind === "video" ? `<div class="swatch-custom">Video<br>template</div><div class="template-name">${escapeHtml(tpl.name)}</div>` : `<div class="template-name">${escapeHtml(tpl.name)}</div>`;
+        } else if (tpl.kind === "image") {
+          el.innerHTML = '<div class="swatch-custom">Upload<br>photo</div><div class="template-name">Your Photo</div>';
+        } else {
+          const dir = tpl.kind === "radial" ? "circle at 50% 20%" : "160deg";
+          el.style.background = `${tpl.kind === "radial" ? "radial-gradient(" : "linear-gradient("}${dir}, ${tpl.colors?.[0]}, ${tpl.colors?.[1]})`;
+          el.innerHTML = `<div class="template-name">${tpl.name}</div>`;
+        }
+        el.addEventListener("click", () => {
+          document.querySelectorAll(".template-swatch").forEach((s) => s.classList.remove("active"));
+          el.classList.add("active");
+          state.template = isAssetTemplate ? "custom" : tpl.id;
+          const uploadSection = document.getElementById("uploadSection") as HTMLElement | null;
+          if (uploadSection) uploadSection.style.display = tpl.id === "custom" || isAssetTemplate ? "block" : "none";
+          if (isAssetTemplate) {
+            void setBackgroundFromSource(tpl.sourceUrl, tpl.asset.mediaKind === "video" || tpl.asset.metadata.type?.toString().startsWith("video/") ? "video" : "image", tpl.asset.storagePath || tpl.sourceUrl);
+            state.backgroundPlacement = { x: 0, y: 0, width: 1, height: 1, opacity: 0.92, fit: "cover" };
+          }
+          renderCurrentStyleEditors();
+          renderPreview();
+        });
+        templateGrid.appendChild(el);
+      });
+    }
+
+    function renderMediaPlacementOverlay() {
+      const overlay = document.getElementById("mediaLayerOverlay") as HTMLDivElement | null;
+      const panel = document.getElementById("mediaPlacementPanel") as HTMLElement | null;
+      const opacityInput = document.getElementById("mediaOpacityInput") as HTMLInputElement | null;
+      const fitSelect = document.getElementById("mediaFitSelect") as HTMLSelectElement | null;
+      if (!overlay) return;
+      if (!state.background || !state.backgroundKind) {
+        overlay.innerHTML = "";
+        overlay.style.display = "none";
+        if (panel) panel.style.display = "none";
+        return;
+      }
+      const placement = clampPlacement(state.backgroundPlacement);
+      state.backgroundPlacement = placement;
+      if (panel) panel.style.display = "block";
+      if (opacityInput) opacityInput.value = String(placement.opacity);
+      if (fitSelect) fitSelect.value = placement.fit;
+      overlay.style.display = "block";
+      const desiredTag = state.backgroundKind === "video" ? "VIDEO" : "IMG";
+      const existingBox = overlay.querySelector("[data-media-box]") as HTMLDivElement | null;
+      if (!existingBox || existingBox.dataset.mediaKind !== desiredTag) {
+        overlay.innerHTML = `
+          <div class="media-layer-box" data-media-box data-media-kind="${desiredTag}">
+            <div class="media-layer-resize" data-media-resize title="Resize media"></div>
+          </div>
+        `;
+      }
+      const box = overlay.querySelector("[data-media-box]") as HTMLDivElement | null;
+      const resizeHandle = overlay.querySelector("[data-media-resize]") as HTMLDivElement | null;
+      if (!box || !resizeHandle) return;
+      const syncPlacementStyles = (nextPlacement: MediaPlacement) => {
+        const next = clampPlacement(nextPlacement);
+        state.backgroundPlacement = next;
+        box.classList.toggle("is-selected", mediaPlacementSelected);
+        box.style.left = `${next.x * 100}%`;
+        box.style.top = `${next.y * 100}%`;
+        box.style.width = `${next.width * 100}%`;
+        box.style.height = `${next.height * 100}%`;
+        box.style.opacity = "1";
+        box.style.cursor = "move";
+        if (opacityInput) opacityInput.value = String(next.opacity);
+        if (fitSelect) fitSelect.value = next.fit;
+        resizeHandle.style.display = mediaPlacementSelected ? "block" : "none";
+      };
+
+      syncPlacementStyles(placement);
+
+      let dragState:
+        | { mode: "move" | "resize"; startX: number; startY: number; startPlacement: MediaPlacement; pointerId: number }
+        | null = null;
+
+      const beginDrag = (mode: "move" | "resize") => (event: PointerEvent) => {
+        event.preventDefault();
+        if (mode === "resize") event.stopPropagation();
+        if (mode === "move" && event.target === resizeHandle) return;
+        mediaPlacementSelected = true;
+        box.classList.add("is-selected");
+        resizeHandle.style.display = "block";
+        dragState = {
+          mode,
+          startX: event.clientX,
+          startY: event.clientY,
+          startPlacement: { ...state.backgroundPlacement },
+          pointerId: event.pointerId
+        };
+        box.setPointerCapture(event.pointerId);
+        document.body.style.userSelect = "none";
+      };
+
+      const moveDrag = (event: PointerEvent) => {
+        if (!dragState || dragState.pointerId !== event.pointerId) return;
+        const bounds = overlay.getBoundingClientRect();
+        const deltaX = (event.clientX - dragState.startX) / bounds.width;
+        const deltaY = (event.clientY - dragState.startY) / bounds.height;
+        if (dragState.mode === "move") {
+          syncPlacementStyles({
+            ...dragState.startPlacement,
+            x: dragState.startPlacement.x + deltaX,
+            y: dragState.startPlacement.y + deltaY
+          });
+        } else {
+          syncPlacementStyles({
+            ...dragState.startPlacement,
+            width: dragState.startPlacement.width + deltaX,
+            height: dragState.startPlacement.height + deltaY
+          });
+        }
+        renderFrame(ctx, 1, 1.06, { mode: "none", progress: 1, zoom: 1.06, contentY: 0 }, 0);
+      };
+
+      const endDrag = (event: PointerEvent) => {
+        if (!dragState || dragState.pointerId !== event.pointerId) return;
+        dragState = null;
+        document.body.style.userSelect = "";
+        try {
+          box.releasePointerCapture(event.pointerId);
+        } catch {
+          /* ignore */
+        }
+        persistProject("Draft");
+      };
+
+      if (box.dataset.bound !== "1") {
+        box.addEventListener("pointerdown", beginDrag("move"));
+        box.addEventListener("pointermove", moveDrag);
+        box.addEventListener("pointerup", endDrag);
+        box.addEventListener("pointercancel", endDrag);
+        box.dataset.bound = "1";
+      }
+      if (resizeHandle.dataset.bound !== "1") {
+        resizeHandle.addEventListener("pointerdown", beginDrag("resize"));
+        resizeHandle.addEventListener("pointermove", moveDrag);
+        resizeHandle.addEventListener("pointerup", endDrag);
+        resizeHandle.addEventListener("pointercancel", endDrag);
+        resizeHandle.dataset.bound = "1";
+      }
+    }
+
+    function renderTextPlacementOverlay() {
+      const overlay = document.getElementById("textLayerOverlay") as HTMLDivElement | null;
+      if (!overlay) return;
+      const layout = buildLayout();
+      const bounds = overlay.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      const scaleX = bounds.width / W;
+      const scaleY = bounds.height / H;
+      const placements = buildTextPlacements(layout);
+
+      if (!placements.length) {
+        overlay.innerHTML = "";
+        return;
+      }
+
+      const ensureBox = (key: keyof EditorState["styles"]) => {
+        const existing = overlay.querySelector(`[data-text-box="${key}"]`) as HTMLDivElement | null;
+        if (existing) return existing;
+        const box = document.createElement("div");
+        box.dataset.textBox = key;
+        box.className = "text-layer-box";
+        box.innerHTML = `<div class="text-layer-handle" data-text-resize></div>`;
+        overlay.appendChild(box);
+        return box;
+      };
+
+      placements.forEach((item) => {
+        const box = ensureBox(item.key);
+        const anchorX = textAnchorX(item.style as EditorState["styles"]["eyebrow"]);
+        let left = anchorX - item.width / 2;
+        if (item.style.align === "left") left = anchorX;
+        if (item.style.align === "right") left = anchorX - item.width;
+        const top = item.top + (item.style.offsetY || 0);
+        box.style.display = "block";
+        box.style.left = `${left * scaleX}px`;
+        box.style.top = `${top * scaleY}px`;
+        box.style.width = `${item.width * scaleX}px`;
+        box.style.height = `${item.height * scaleY}px`;
+        box.classList.toggle("is-selected", textPlacementSelectedKey === item.key);
+      });
+
+      overlay.querySelectorAll<HTMLElement>(".text-layer-box").forEach((box) => {
+        const key = box.dataset.textBox as keyof EditorState["styles"] | undefined;
+        if (!key || placements.every((item) => item.key !== key)) {
+          box.remove();
+          return;
+        }
+      });
+
+      let dragState:
+        | { key: keyof EditorState["styles"]; startX: number; startY: number; startOffsetX: number; startOffsetY: number; pointerId: number }
+        | null = null;
+
+      const beginDrag = (key: keyof EditorState["styles"]) => (event: PointerEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        textPlacementSelectedKey = key;
+        const style = state.styles[key];
+        dragState = {
+          key,
+          startX: event.clientX,
+          startY: event.clientY,
+          startOffsetX: style.offsetX || 0,
+          startOffsetY: style.offsetY || 0,
+          pointerId: event.pointerId
+        };
+        const target = overlay.querySelector(`[data-text-box="${key}"]`) as HTMLElement | null;
+        target?.setPointerCapture(event.pointerId);
+        document.body.style.userSelect = "none";
+        renderTextPlacementOverlay();
+      };
+
+      const moveDrag = (event: PointerEvent) => {
+        if (!dragState || dragState.pointerId !== event.pointerId) return;
+        const deltaX = ((event.clientX - dragState.startX) / bounds.width) * W;
+        const deltaY = ((event.clientY - dragState.startY) / bounds.height) * H;
+        state.styles[dragState.key].offsetX = dragState.startOffsetX + deltaX;
+        state.styles[dragState.key].offsetY = dragState.startOffsetY + deltaY;
+        renderFrame(ctx, 1, 1.06, { mode: "none", progress: 1, zoom: 1.06, contentY: 0 }, 0);
+        renderTextPlacementOverlay();
+      };
+
+      const endDrag = (event: PointerEvent) => {
+        if (!dragState || dragState.pointerId !== event.pointerId) return;
+        const box = overlay.querySelector(`[data-text-box="${dragState.key}"]`) as HTMLElement | null;
+        if (box && box.hasPointerCapture(event.pointerId)) {
+          try {
+            box.releasePointerCapture(event.pointerId);
+          } catch {
+            /* ignore */
+          }
+        }
+        dragState = null;
+        document.body.style.userSelect = "";
+        persistProject("Draft");
+      };
+
+      overlay.querySelectorAll<HTMLElement>(".text-layer-box").forEach((box) => {
+        const key = box.dataset.textBox as keyof EditorState["styles"] | undefined;
+        if (!key) return;
+        if (box.dataset.bound !== "1") {
+          box.addEventListener("pointerdown", beginDrag(key));
+          box.addEventListener("pointermove", moveDrag);
+          box.addEventListener("pointerup", endDrag);
+          box.addEventListener("pointercancel", endDrag);
+          box.dataset.bound = "1";
+        }
+      });
     }
 
     async function exportPNG(options?: { download?: boolean }) {
@@ -1183,54 +1688,66 @@ export function HadithStudio() {
       studioDbSnapshot = sourceDb;
       await hydrateFromLibrary(sourceDb);
       await applyPendingReuse(sourceDb);
-      const templateGrid = document.getElementById("templateGrid");
-      if (templateGrid) {
-        templateGrid.innerHTML = "";
-        templateOptions.forEach((tpl) => {
-          const el = document.createElement("div");
-          el.className = `template-swatch${tpl.id === state.template ? " active" : ""}`;
-          el.dataset.tpl = tpl.id;
-          if (tpl.kind === "image") {
-            el.innerHTML = '<div class="swatch-custom">Upload<br>photo</div><div class="template-name">Your Photo</div>';
-          } else {
-            const dir = tpl.kind === "radial" ? "circle at 50% 20%" : "160deg";
-            el.style.background = `${tpl.kind === "radial" ? "radial-gradient(" : "linear-gradient("}${dir}, ${tpl.colors?.[0]}, ${tpl.colors?.[1]})`;
-            el.innerHTML = `<div class="template-name">${tpl.name}</div>`;
-          }
-          el.addEventListener("click", () => {
-            document.querySelectorAll(".template-swatch").forEach((s) => s.classList.remove("active"));
-            el.classList.add("active");
-            state.template = tpl.id;
-            const uploadSection = document.getElementById("uploadSection") as HTMLElement | null;
-            if (uploadSection) uploadSection.style.display = tpl.id === "custom" ? "block" : "none";
-            renderCurrentStyleEditors();
-            renderPreview();
-          });
-          templateGrid.appendChild(el);
-        });
-      }
+      renderTemplateGrid(sourceDb);
 
       renderCurrentStyleEditors();
+      renderAudioTracks();
+      renderAudioLibraryPicker(sourceDb);
 
       const uploadSection = document.getElementById("uploadSection") as HTMLElement | null;
       if (uploadSection) uploadSection.style.display = state.template === "custom" ? "block" : "none";
+      renderMediaPlacementOverlay();
+      renderTextPlacementOverlay();
+
+      const previewCanvas = canvasRef.current;
+      if (previewCanvas && previewCanvas.dataset.mediaDeselectBound !== "1") {
+        previewCanvas.addEventListener("pointerdown", () => {
+          mediaPlacementSelected = false;
+          textPlacementSelectedKey = null;
+          renderMediaPlacementOverlay();
+          renderTextPlacementOverlay();
+        });
+        previewCanvas.dataset.mediaDeselectBound = "1";
+      }
 
       const bgUpload = document.getElementById("bgUpload") as HTMLInputElement | null;
       bgUpload?.addEventListener("change", (event) => {
         const file = (event.target as HTMLInputElement).files?.[0];
         if (!file) return;
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          const source = String(ev.target?.result || "");
-          const kind: "image" | "video" = file.type.startsWith("video/") ? "video" : "image";
-          void setBackgroundFromSource(source, kind)
-            .then(() => renderPreview())
-            .catch((error) => {
-              console.error("Background upload failed:", error);
-              alert("Could not load that background media file.");
+        const kind: "image" | "video" = file.type.startsWith("video/") ? "video" : "image";
+        const assetKind: AssetKind = state.template === "custom" ? "template" : "background";
+        void (async () => {
+          try {
+            const uploadedUrl = await uploadBlobToCloudinary({
+              blob: file,
+              path: `studio/backgrounds/${Date.now()}-${file.name}`,
+              contentType: file.type || "application/octet-stream",
+              fileName: file.name,
+              resourceType: kind
             });
-        };
-        reader.readAsDataURL(file);
+            await setBackgroundFromSource(uploadedUrl, kind, uploadedUrl);
+            state.backgroundPlacement = { x: 0, y: 0, width: 1, height: 1, opacity: 1, fit: "cover" };
+            mediaPlacementSelected = true;
+            saveUploadedAsset({
+              id: `asset-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              name: file.name,
+              kind: assetKind,
+              sourceUrl: uploadedUrl,
+              storagePath: uploadedUrl,
+              fileSize: file.size,
+              favorite: false,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              mediaKind: kind,
+              metadata: { type: file.type, uploadedBy: "cloudinary", source: "editor-background" }
+            });
+            if (assetKind === "template") renderTemplateGrid(studioDbSnapshot);
+            renderPreview();
+          } catch (error) {
+            console.error("Background upload failed:", error);
+            alert("Could not load that background media file.");
+          }
+        })();
       });
 
       function bindText(inputId: string, key: keyof Pick<EditorState, "eyebrow" | "arabic" | "english" | "source">) {
@@ -1245,9 +1762,27 @@ export function HadithStudio() {
       bindText("englishInput", "english");
       bindText("sourceInput", "source");
 
-      const watermarkInput = document.getElementById("watermarkInput") as HTMLInputElement | null;
+      const watermarkInput = document.getElementById("watermarkInput") as HTMLTextAreaElement | null;
       watermarkInput?.addEventListener("input", (event) => {
-        state.watermark.text = (event.target as HTMLInputElement).value;
+        state.watermark.text = (event.target as HTMLTextAreaElement).value;
+        renderPreview();
+      });
+
+      const opacityInput = document.getElementById("mediaOpacityInput") as HTMLInputElement | null;
+      opacityInput?.addEventListener("input", (event) => {
+        state.backgroundPlacement = clampPlacement({ ...state.backgroundPlacement, opacity: Number((event.target as HTMLInputElement).value) });
+        renderPreview();
+      });
+
+      const fitSelect = document.getElementById("mediaFitSelect") as HTMLSelectElement | null;
+      fitSelect?.addEventListener("change", (event) => {
+        state.backgroundPlacement = clampPlacement({ ...state.backgroundPlacement, fit: (event.target as HTMLSelectElement).value as "cover" | "contain" });
+        renderPreview();
+      });
+
+      const resetMediaPlacementBtn = document.getElementById("resetMediaPlacementBtn") as HTMLButtonElement | null;
+      resetMediaPlacementBtn?.addEventListener("click", () => {
+        state.backgroundPlacement = { x: 0, y: 0, width: 1, height: 1, opacity: 1, fit: "cover" };
         renderPreview();
       });
 
@@ -1319,6 +1854,36 @@ export function HadithStudio() {
         const files = Array.from((event.target as HTMLInputElement).files || []);
         if (!files.length) return;
         await addAudioFiles(files);
+        void (async () => {
+          for (const file of files) {
+            try {
+              const uploadedUrl = await uploadBlobToCloudinary({
+                blob: file,
+                path: `studio/audio/${Date.now()}-${file.name}`,
+                contentType: file.type || "application/octet-stream",
+                fileName: file.name,
+                resourceType: "auto"
+              });
+              saveUploadedAsset({
+                id: `asset-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                name: file.name,
+                kind: "audio",
+                sourceUrl: uploadedUrl,
+                storagePath: uploadedUrl,
+                fileSize: file.size,
+                duration: 0,
+                favorite: false,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                mediaKind: "audio",
+                metadata: { type: file.type, uploadedBy: "cloudinary", source: "editor-audio" }
+              });
+              renderAudioLibraryPicker(studioDbSnapshot);
+            } catch (error) {
+              console.error("Audio asset upload failed:", error);
+            }
+          }
+        })();
         (event.target as HTMLInputElement).value = "";
       });
 
@@ -1584,6 +2149,27 @@ export function HadithStudio() {
             </div>
           </div>
 
+          <div id="mediaPlacementPanel" style={{ display: "none" }}>
+            <span className="field-label">Media placement</span>
+            <div className="mb-2 text-[11px] leading-5 text-[var(--text-dim)]">Drag the gold box on the preview to move it. Drag the corner handle to resize.</div>
+            <div className="media-controls">
+              <label className="media-control">
+                <span>Opacity</span>
+                <input id="mediaOpacityInput" type="range" min="0.05" max="1" step="0.01" defaultValue="1" />
+              </label>
+              <label className="media-control">
+                <span>Fit</span>
+                <Select id="mediaFitSelect" defaultValue="cover">
+                  <option value="cover">Cover</option>
+                  <option value="contain">Contain</option>
+                </Select>
+              </label>
+              <Button id="resetMediaPlacementBtn" type="button" variant="outline">
+                Reset placement
+              </Button>
+            </div>
+          </div>
+
           <span className="field-label">Extract from sunnah.com</span>
           <div className="extract-row">
             <Input type="text" id="sunnahUrlInput" placeholder="https://sunnah.com/muslim:11b" />
@@ -1612,7 +2198,7 @@ export function HadithStudio() {
               <input type="checkbox" id="hideEyebrowToggle" /> Hide
             </label>
           </div>
-          <Input type="text" id="eyebrowInput" placeholder="e.g. On Kindness" />
+          <Textarea id="eyebrowInput" rows={3} placeholder={"e.g. On Kindness\nOptional second line"} className="min-h-[84px] resize-y" />
           <div id="eyebrowEditor" />
 
           <span className="field-label">Arabic font</span>
@@ -1667,7 +2253,8 @@ export function HadithStudio() {
           <div id="sourceEditor" />
 
           <span className="field-label">Copyright / watermark</span>
-          <Input type="text" id="watermarkInput" placeholder="© Nayeem / @nayeem" defaultValue="" />
+          <Textarea id="watermarkInput" rows={3} placeholder={"© Nayeem\n@nayeem"} className="min-h-[84px] resize-y" defaultValue="" />
+          <div id="watermarkEditor" />
 
           <span className="field-label">Export format</span>
           <div className="format-toggle">
@@ -1732,6 +2319,14 @@ export function HadithStudio() {
                   <input type="file" id="audioUpload" accept="audio/*" multiple />
                 </label>
               </div>
+              <div className="audio-library-row">
+                <select id="audioLibrarySelect" className="audio-library-select">
+                  <option value="">Choose saved audio</option>
+                </select>
+                <Button id="audioLibraryLoadBtn" type="button" variant="outline">
+                  Use saved audio
+                </Button>
+              </div>
               <div id="audioTrackList">
                 <div className="audio-empty">Add music, voiceover, or sound effects. Each track can be trimmed and positioned on the video timeline.</div>
               </div>
@@ -1763,9 +2358,11 @@ export function HadithStudio() {
       </section>
 
       <section className="hadith-stage order-1 flex items-center justify-center border-b border-[rgba(255,255,255,.06)] p-4 shadow-stage lg:order-2 lg:flex-1 lg:border-b-0 lg:p-6">
-        <div ref={previewShellRef} className="preview-shell w-full max-w-full">
-          <div className="frame-wrap shadow-frame">
+        <div ref={previewShellRef} className="preview-shell relative w-full max-w-full">
+          <div className="frame-wrap relative shadow-frame">
             <canvas ref={canvasRef} id="previewCanvas" width={1080} height={1920} className="block aspect-[9/16] w-full rounded-[4px] bg-black" />
+            <div id="mediaLayerOverlay" className="media-layer-overlay" />
+            <div id="textLayerOverlay" className="text-layer-overlay" />
           </div>
           <div className="preview-resize-handle" id="previewResizeHandle" title="Drag to resize preview" />
         </div>

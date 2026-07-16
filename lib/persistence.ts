@@ -43,6 +43,42 @@ export function normalizeStudioDb(db: Partial<StudioDatabase> | null | undefined
   };
 }
 
+function mergeById<T extends { id: string }>(base: T[], overlay: T[]) {
+  const merged = new Map<string, T>();
+  for (const item of base) merged.set(item.id, item);
+  for (const item of overlay) merged.set(item.id, item);
+  return [...merged.values()];
+}
+
+function mergeStringLists(base: string[] = [], overlay: string[] = []) {
+  return [...new Set([...base, ...overlay])];
+}
+
+export function mergeStudioDb(base: StudioDatabase, overlay: StudioDatabase | null | undefined): StudioDatabase {
+  if (!overlay) return base;
+  return normalizeStudioDb({
+    ...base,
+    projects: mergeById(base.projects, overlay.projects),
+    assets: mergeById(base.assets, overlay.assets),
+    hashtags: mergeById(base.hashtags, overlay.hashtags),
+    bufferQueue: mergeById(base.bufferQueue, overlay.bufferQueue),
+    bufferAccounts: mergeById(base.bufferAccounts, overlay.bufferAccounts),
+    favorites: {
+      projectIds: mergeStringLists(base.favorites.projectIds, overlay.favorites.projectIds),
+      assetIds: mergeStringLists(base.favorites.assetIds, overlay.favorites.assetIds),
+      hashtagIds: mergeStringLists(base.favorites.hashtagIds, overlay.favorites.hashtagIds)
+    },
+    settings: {
+      ...base.settings,
+      ...overlay.settings,
+      creator: {
+        ...base.settings.creator,
+        ...overlay.settings.creator
+      }
+    }
+  });
+}
+
 export function readLocalDb(): StudioDatabase {
   return readLocalDbSnapshot().db;
 }

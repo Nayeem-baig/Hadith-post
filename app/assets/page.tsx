@@ -8,25 +8,17 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useStudioDb } from "@/hooks/use-studio-db";
+import { uploadBlobToCloudinary } from "@/lib/cloudinary-upload";
 import { upsertAsset } from "@/lib/persistence";
 import type { AssetRecord, AssetKind } from "@/types/studio";
 
-async function fileToDataUrl(file: File) {
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error("Could not read file."));
-    reader.readAsDataURL(file);
-  });
-}
-
-async function audioDurationFromDataUrl(dataUrl: string) {
+async function audioDurationFromSource(sourceUrl: string) {
   return await new Promise<number>((resolve) => {
     const audio = document.createElement("audio");
     audio.preload = "metadata";
     audio.onloadedmetadata = () => resolve(audio.duration || 0);
     audio.onerror = () => resolve(0);
-    audio.src = dataUrl;
+    audio.src = sourceUrl;
   });
 }
 
@@ -53,20 +45,34 @@ export default function AssetsPage() {
     try {
       const uploaded: AssetRecord[] = [];
       for (const file of files) {
-        const sourceUrl = await fileToDataUrl(file);
-        const nextKind: AssetKind = file.type.startsWith("audio") ? "audio" : "background";
-        const duration = nextKind === "audio" ? await audioDurationFromDataUrl(sourceUrl) : undefined;
+        const isAudio = file.type.startsWith("audio");
+        const isVideo = file.type.startsWith("video");
+        const isImage = file.type.startsWith("image");
+        if (kind === "audio" && !isAudio) throw new Error("Audio assets must be audio files.");
+        if ((kind === "background" || kind === "template") && !isImage && !isVideo) throw new Error("Backgrounds and templates must be images or videos.");
+        const resourceType = isVideo ? "video" : isImage ? "image" : "auto";
+        const uploadedUrl = await uploadBlobToCloudinary({
+          blob: file,
+          path: `assets/${kind}/${Date.now()}-${file.name}`,
+          contentType: file.type || "application/octet-stream",
+          fileName: file.name,
+          resourceType
+        });
+        const sourceUrl = uploadedUrl;
+        const duration = isAudio ? await audioDurationFromSource(sourceUrl) : undefined;
         uploaded.push({
           id: `asset-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           name: file.name,
-          kind: nextKind,
+          kind,
           sourceUrl,
+          storagePath: sourceUrl,
           fileSize: file.size,
           duration,
           favorite: false,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
-          metadata: { type: file.type, uploadedBy: "local" }
+          mediaKind: isAudio ? "audio" : isVideo ? "video" : "image",
+          metadata: { type: file.type, uploadedBy: "cloudinary" }
         });
       }
       setDb((current) => uploaded.reduce((state, asset) => upsertAsset(state, asset), current));
@@ -91,10 +97,10 @@ export default function AssetsPage() {
   }
 
   function reuseAsset(asset: AssetRecord) {
-    if (asset.kind === "background") {
+    if (asset.kind === "background" || asset.kind === "template") {
       window.localStorage.setItem("hadith-studio-pending-background", asset.sourceUrl);
       window.localStorage.setItem("hadith-studio-pending-background-name", asset.name);
-      window.localStorage.setItem("hadith-studio-pending-background-kind", asset.metadata.type?.toString().startsWith("video/") ? "video" : "image");
+      window.localStorage.setItem("hadith-studio-pending-background-kind", asset.mediaKind === "video" || asset.metadata.type?.toString().startsWith("video/") ? "video" : "image");
     } else {
       window.localStorage.setItem("hadith-studio-pending-audio", asset.sourceUrl);
       window.localStorage.setItem("hadith-studio-pending-audio-name", asset.name);
@@ -103,7 +109,7 @@ export default function AssetsPage() {
   }
 
   return (
-    <RouteShell title="Asset Library" description="Background images and audio uploads, stored locally and ready for Cloudinary sync.">
+    <RouteShell title="Asset Library" description="Backgrounds, templates, and audio uploads stored in Cloudinary and reused everywhere.">
       <Card className="border-[var(--panel-border)] bg-[#11161d]">
         <CardHeader>
           <CardTitle className="text-[var(--gold-soft)]">Uploads</CardTitle>
@@ -115,12 +121,13 @@ export default function AssetsPage() {
               <span className="mb-2 block text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Kind</span>
               <select className="w-full bg-transparent outline-none" value={kind} onChange={(event) => setKind(event.target.value as AssetKind)}>
                 <option value="background">Backgrounds</option>
+                <option value="template">Templates</option>
                 <option value="audio">Audio</option>
               </select>
             </label>
             <label className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-sm md:col-span-2">
               <span className="mb-2 block text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Upload files</span>
-            <Input type="file" accept="image/*,video/*,audio/*" multiple onChange={handleUpload} disabled={uploading} className="border-none bg-transparent p-0" />
+              <Input type="file" accept="image/*,video/*,audio/*" multiple onChange={handleUpload} disabled={uploading} className="border-none bg-transparent p-0" />
             </label>
             <label className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-sm">
               <span className="mb-2 block text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Search</span>
@@ -147,14 +154,14 @@ export default function AssetsPage() {
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <div className="overflow-hidden rounded-md border border-[var(--panel-border)] bg-black/40">
-                    {asset.kind === "background" ? (
-                      asset.metadata.type?.toString().startsWith("video/") ? (
+                    {asset.kind === "audio" ? (
+                      <audio controls className="w-full" src={asset.sourceUrl} />
+                    ) : (
+                      asset.mediaKind === "video" || asset.metadata.type?.toString().startsWith("video/") ? (
                         <video src={asset.sourceUrl} controls className="h-48 w-full object-cover" />
                       ) : (
                         <img src={asset.sourceUrl} alt={asset.name} className="h-48 w-full object-cover" />
                       )
-                    ) : (
-                      <audio controls className="w-full" src={asset.sourceUrl} />
                     )}
                   </div>
                   <div className="flex flex-wrap gap-2">

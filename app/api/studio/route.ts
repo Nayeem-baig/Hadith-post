@@ -6,6 +6,7 @@ import type { StudioDatabase } from "@/types/studio";
 import { studioDocumentId } from "@/lib/mongodb";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const COLLECTION = "studio_state";
 async function getUsername(request: NextRequest) {

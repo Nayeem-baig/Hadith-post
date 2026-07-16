@@ -1,5 +1,5 @@
 import { autoFilename } from "@/utils/filename";
-import type { AudioTrack, HadithProject, TextStyle } from "@/types/studio";
+import type { AudioTrack, HadithProject, MediaPlacement, TextStyle } from "@/types/studio";
 
 export interface EditorState {
   template: string;
@@ -20,9 +20,10 @@ export interface EditorState {
   bgImage?: HTMLImageElement | HTMLVideoElement | null;
   backgroundKind?: "image" | "video" | null;
   backgroundRef?: string | null;
+  backgroundPlacement: MediaPlacement;
   arabicFont: string;
   englishFont: string;
-  styles: Record<"eyebrow" | "arabic" | "english" | "source", TextStyle>;
+  styles: Record<"eyebrow" | "arabic" | "english" | "source" | "watermark", TextStyle>;
   watermark: {
     enabled: boolean;
     opacity: number;
@@ -31,6 +32,7 @@ export interface EditorState {
     position: HadithProject["exportSettings"]["watermarkPosition"];
     text: string;
   };
+  watermarkStyle: TextStyle;
 }
 
 export function createDefaultEditorState(): EditorState {
@@ -53,13 +55,15 @@ export function createDefaultEditorState(): EditorState {
     bgImage: null,
     backgroundKind: null,
     backgroundRef: null,
+    backgroundPlacement: { x: 0, y: 0, width: 1, height: 1, opacity: 1, fit: "cover" },
     arabicFont: "amiri",
     englishFont: "cormorant",
     styles: {
-      eyebrow: { hidden: false, size: 24, bold: true, italic: false, underline: false, align: "center", indent: 0, lineHeight: 1.25, paragraphSpacing: 18, color: "" },
-      arabic: { hidden: false, size: 64, bold: true, italic: false, underline: false, align: "center", indent: 0, lineHeight: 1.7, paragraphSpacing: 26, color: "" },
-      english: { hidden: false, size: 42, bold: false, italic: true, underline: false, align: "center", indent: 0, lineHeight: 1.5, paragraphSpacing: 18, color: "" },
-      source: { hidden: false, size: 24, bold: false, italic: false, underline: false, align: "center", indent: 0, lineHeight: 1.25, paragraphSpacing: 12, color: "" }
+      eyebrow: { hidden: false, size: 24, bold: true, italic: false, underline: false, align: "center", indent: 0, lineHeight: 1.25, paragraphSpacing: 18, color: "", offsetX: 0, offsetY: 0 },
+      arabic: { hidden: false, size: 64, bold: true, italic: false, underline: false, align: "center", indent: 0, lineHeight: 1.7, paragraphSpacing: 26, color: "", offsetX: 0, offsetY: 0 },
+      english: { hidden: false, size: 42, bold: false, italic: true, underline: false, align: "center", indent: 0, lineHeight: 1.5, paragraphSpacing: 18, color: "", offsetX: 0, offsetY: 0 },
+      source: { hidden: false, size: 24, bold: false, italic: false, underline: false, align: "center", indent: 0, lineHeight: 1.25, paragraphSpacing: 12, color: "", offsetX: 0, offsetY: 0 },
+      watermark: { hidden: false, size: 28, bold: false, italic: false, underline: false, align: "right", indent: 0, lineHeight: 1.2, paragraphSpacing: 8, color: "#ffffff", offsetX: 0, offsetY: 0 }
     },
     watermark: {
       enabled: true,
@@ -68,7 +72,8 @@ export function createDefaultEditorState(): EditorState {
       size: 28,
       position: "bottom-right",
       text: ""
-    }
+    },
+    watermarkStyle: { hidden: false, size: 28, bold: false, italic: false, underline: false, align: "right", indent: 0, lineHeight: 1.2, paragraphSpacing: 8, color: "#ffffff", offsetX: 0, offsetY: 0 }
   };
 }
 
@@ -102,6 +107,7 @@ export function createProjectFromEditor(params: {
     background: undefined,
     backgroundKind: params.state.backgroundKind || undefined,
     backgroundRef: params.state.backgroundRef || undefined,
+    backgroundPlacement: params.state.backgroundPlacement,
     caption: params.state.caption,
     hashtags: params.state.hashtags,
     exportSettings: {
@@ -111,9 +117,10 @@ export function createProjectFromEditor(params: {
       watermark: params.state.watermark.enabled,
       watermarkOpacity: params.state.watermark.opacity,
       watermarkFont: params.state.watermark.font,
-      watermarkSize: params.state.watermark.size,
+      watermarkSize: params.state.styles.watermark.size,
       watermarkPosition: params.state.watermark.position,
-      watermarkText: params.state.watermark.text
+      watermarkText: params.state.watermark.text,
+      watermarkStyle: params.state.styles.watermark
     },
     styles: params.state.styles,
     audioTracks: params.state.audioTracks,
@@ -123,6 +130,7 @@ export function createProjectFromEditor(params: {
 }
 
 export function editorFromProject(project: HadithProject): EditorState {
+  const defaultWatermarkStyle: TextStyle = { hidden: false, size: 28, bold: false, italic: false, underline: false, align: "right", indent: 0, lineHeight: 1.2, paragraphSpacing: 8, color: "#ffffff", offsetX: 0, offsetY: 0 };
   return {
     template: project.template,
     format: project.format,
@@ -142,9 +150,16 @@ export function editorFromProject(project: HadithProject): EditorState {
     bgImage: null,
     backgroundKind: project.backgroundKind || null,
     backgroundRef: project.backgroundRef || null,
+    backgroundPlacement: project.backgroundPlacement || { x: 0, y: 0, width: 1, height: 1, opacity: 1, fit: "cover" },
     arabicFont: "amiri",
     englishFont: "cormorant",
-    styles: project.styles,
+    styles: {
+      eyebrow: { offsetX: 0, offsetY: 0, ...project.styles.eyebrow },
+      arabic: { offsetX: 0, offsetY: 0, ...project.styles.arabic },
+      english: { offsetX: 0, offsetY: 0, ...project.styles.english },
+      source: { offsetX: 0, offsetY: 0, ...project.styles.source },
+      watermark: { offsetX: 0, offsetY: 0, ...(project.styles.watermark || defaultWatermarkStyle) }
+    },
     watermark: {
       enabled: project.exportSettings.watermark,
       opacity: project.exportSettings.watermarkOpacity,
@@ -152,6 +167,7 @@ export function editorFromProject(project: HadithProject): EditorState {
       size: project.exportSettings.watermarkSize,
       position: project.exportSettings.watermarkPosition,
       text: project.exportSettings.watermarkText
-    }
+    },
+    watermarkStyle: { offsetX: 0, offsetY: 0, ...(project.exportSettings.watermarkStyle || defaultWatermarkStyle) }
   };
 }

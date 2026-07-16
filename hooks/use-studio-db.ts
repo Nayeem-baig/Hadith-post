@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createInitialDb, fetchStudioDb, readLocalDb, readLocalDbSnapshot, writeLocalDb } from "@/lib/persistence";
+import { createInitialDb, fetchStudioDb, mergeStudioDb, readLocalDb, readLocalDbSnapshot, writeLocalDb } from "@/lib/persistence";
 import type { StudioDatabase } from "@/types/studio";
 
 export function useStudioDb() {
@@ -16,7 +16,8 @@ export function useStudioDb() {
       if (!active) return;
       if (serverResponse?.configured && serverResponse.connected) {
         if (serverResponse.hasDocument) {
-          setDb(serverResponse.db);
+          const localSnapshot = readLocalDbSnapshot();
+          setDb(localSnapshot.hasData ? mergeStudioDb(serverResponse.db, localSnapshot.db) : serverResponse.db);
         } else {
           const localSnapshot = readLocalDbSnapshot();
           setDb(localSnapshot.hasData ? localSnapshot.db : serverResponse.db);

@@ -3,14 +3,20 @@ import { createBufferPost } from "@/lib/buffer";
 import { getDb } from "@/lib/mongodb";
 import { verifySessionToken } from "@/lib/auth";
 import { normalizeStudioDb } from "@/lib/persistence";
-import type { BufferQueueItem, StudioDatabase } from "@/types/studio";
+import type { BufferPostRecord, BufferQueueItem, StudioDatabase } from "@/types/studio";
 import { studioDocumentId } from "@/lib/mongodb";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 type PublishBody = {
   organizationId: string;
-  channels: Array<{ id: string; service: string }>;
+  channels: Array<{
+    id: string;
+    service: string;
+    instagramTypes?: Array<"post" | "story" | "reel">;
+    youtubeCategory?: string;
+  }>;
   caption?: string;
   title?: string;
   scheduledAt?: string;
@@ -103,10 +109,11 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const createdPosts = [];
-    const createdDrafts = [];
+    const createdPosts: BufferPostRecord[] = [];
+    const createdDrafts: BufferPostRecord[] = [];
     for (const channel of body.channels) {
       const isYoutube = channel.service.toLowerCase().includes("youtube");
+      const isInstagram = channel.service.toLowerCase().includes("instagram");
       if (isYoutube && body.mediaKind !== "video") {
         return NextResponse.json({ ok: false, error: "YouTube requires a video export. Switch the hadith to video before posting." }, { status: 400 });
       }
@@ -122,8 +129,38 @@ export async function POST(request: NextRequest) {
                   }
                 }
               }
-            ]
+          ]
           : [{ image: { url: body.mediaUrl } }];
+      if (isInstagram) {
+        const instagramTypes: Array<"post" | "story" | "reel"> = channel.instagramTypes?.length
+          ? channel.instagramTypes
+          : [body.mediaKind === "video" ? "reel" : "post"];
+        for (const instagramType of instagramTypes) {
+          const result = await createBufferPost({
+            organizationId: body.organizationId,
+            channelId: channel.id,
+            text,
+            scheduledAt: body.scheduledAt,
+            saveToDraft: body.saveToDraft,
+            assets,
+            metadata: {
+              instagram: {
+                type: instagramType,
+                shouldShareToFeed: instagramType !== "story"
+              }
+            }
+          });
+          if ("message" in result) {
+            throw new Error(result.message);
+          }
+          if (body.saveToDraft) {
+            createdDrafts.push(result.post);
+          } else {
+            createdPosts.push(result.post);
+          }
+        }
+        continue;
+      }
       const metadata = isYoutube
         ? {
             youtube: {
