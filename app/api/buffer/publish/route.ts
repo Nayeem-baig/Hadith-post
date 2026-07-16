@@ -86,6 +86,18 @@ async function mirrorQueueToMongo(username: string, items: BufferQueueItem[]) {
   }
 }
 
+function platformLabel(service: string, platformType?: string, category?: string) {
+  const normalized = service.toLowerCase();
+  if (normalized.includes("instagram")) {
+    const suffix = platformType ? platformType.charAt(0).toUpperCase() + platformType.slice(1) : "Post";
+    return `Instagram · ${suffix}`;
+  }
+  if (normalized.includes("youtube")) {
+    return category ? `YouTube · ${category}` : "YouTube";
+  }
+  return service || "Buffer";
+}
+
 export async function POST(request: NextRequest) {
   let body: PublishBody | null = null;
   try {
@@ -109,6 +121,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
+    const channelById = new Map(body.channels.map((channel) => [channel.id, channel]));
     const createdPosts: BufferPostRecord[] = [];
     const createdDrafts: BufferPostRecord[] = [];
     for (const channel of body.channels) {
@@ -196,6 +209,20 @@ export async function POST(request: NextRequest) {
         status: "draft",
         scheduledAt: post.dueAt,
         accountIds: [post.channelId],
+        service: channelById.get(post.channelId)?.service,
+        mediaKind: body.mediaKind,
+        mediaType: body.mediaType,
+        fileName: body.fileName,
+        platformType: channelById.get(post.channelId)?.service.toLowerCase().includes("instagram")
+          ? (channelById.get(post.channelId)?.instagramTypes?.[0] || (body.mediaKind === "video" ? "reel" : "post"))
+          : body.mediaKind === "video"
+            ? "video"
+            : "image",
+        platformLabel: platformLabel(
+          channelById.get(post.channelId)?.service || post.channelId,
+          channelById.get(post.channelId)?.instagramTypes?.[0],
+          channelById.get(post.channelId)?.youtubeCategory || body.category
+        ),
         caption: body.caption,
         tags: body.tags
       }));
@@ -210,6 +237,20 @@ export async function POST(request: NextRequest) {
       status: (post.status as BufferQueueItem["status"]) || (body.scheduledAt ? "scheduled" : "queue"),
       scheduledAt: post.dueAt || body.scheduledAt,
       accountIds: [post.channelId],
+      service: channelById.get(post.channelId)?.service,
+      mediaKind: body.mediaKind,
+      mediaType: body.mediaType,
+      fileName: body.fileName,
+      platformType: channelById.get(post.channelId)?.service.toLowerCase().includes("instagram")
+        ? (channelById.get(post.channelId)?.instagramTypes?.[0] || (body.mediaKind === "video" ? "reel" : "post"))
+        : body.mediaKind === "video"
+          ? "video"
+          : "image",
+      platformLabel: platformLabel(
+        channelById.get(post.channelId)?.service || post.channelId,
+        channelById.get(post.channelId)?.instagramTypes?.[0],
+        channelById.get(post.channelId)?.youtubeCategory || body.category
+      ),
       caption: body.caption,
       tags: body.tags
     }));

@@ -176,6 +176,12 @@ export interface BufferQueueItem {
   status: "draft" | "queue" | "scheduled" | "published" | "failed";
   scheduledAt?: string;
   accountIds: string[];
+  service?: string;
+  platformType?: "post" | "story" | "reel" | "video" | "image";
+  platformLabel?: string;
+  mediaKind?: "image" | "video";
+  mediaType?: string;
+  fileName?: string;
   caption?: string;
   tags?: string[];
   error?: string;

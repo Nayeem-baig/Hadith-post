@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createInitialDb, fetchStudioDb, mergeStudioDb, readLocalDb, readLocalDbSnapshot, writeLocalDb } from "@/lib/persistence";
 import type { StudioDatabase } from "@/types/studio";
 
@@ -8,6 +8,9 @@ export function useStudioDb() {
   const [db, setDb] = useState<StudioDatabase>(createInitialDb());
   const [ready, setReady] = useState(false);
   const [storageMode, setStorageMode] = useState<"server" | "local">("server");
+  const syncTimerRef = useRef<number | null>(null);
+  const lastSyncedSnapshotRef = useRef("");
+  const syncRevisionRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -38,7 +41,17 @@ export function useStudioDb() {
   useEffect(() => {
     if (!ready) return;
     if (storageMode === "server") {
-      writeLocalDb(db);
+      const snapshot = JSON.stringify(db);
+      if (snapshot === lastSyncedSnapshotRef.current) return;
+      if (syncTimerRef.current) {
+        window.clearTimeout(syncTimerRef.current);
+      }
+      const revision = ++syncRevisionRef.current;
+      syncTimerRef.current = window.setTimeout(() => {
+        if (syncRevisionRef.current !== revision) return;
+        lastSyncedSnapshotRef.current = snapshot;
+        writeLocalDb(db);
+      }, 750);
       return;
     }
     try {
@@ -52,6 +65,10 @@ export function useStudioDb() {
     function handleBeforeUnload() {
       if (storageMode !== "server" || typeof navigator === "undefined" || !navigator.sendBeacon) return;
       try {
+        if (syncTimerRef.current) {
+          window.clearTimeout(syncTimerRef.current);
+        }
+        lastSyncedSnapshotRef.current = JSON.stringify(db);
         navigator.sendBeacon(
           "/api/studio",
           new Blob([JSON.stringify({ db })], {

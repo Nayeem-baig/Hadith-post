@@ -19,8 +19,9 @@ export async function getMongoClient() {
   if (!uri) throw new Error("MongoDB credentials are not configured.");
   if (!global.__mongoClientPromise) {
     global.__mongoClientPromise = new MongoClient(uri, {
-      serverSelectionTimeoutMS: 10000,
-      connectTimeoutMS: 10000,
+      serverSelectionTimeoutMS: 4000,
+      connectTimeoutMS: 4000,
+      socketTimeoutMS: 4000,
       tls: true
     }).connect();
   }

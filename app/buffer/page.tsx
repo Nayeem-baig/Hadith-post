@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { RouteShell } from "@/components/studio/RouteShell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useStudioDb } from "@/hooks/use-studio-db";
-import type { BufferChannel, BufferPostRecord } from "@/types/studio";
+import type { BufferChannel, BufferPostRecord, BufferQueueItem } from "@/types/studio";
 
 type BufferBootstrapResponse = {
   configured: boolean;
@@ -33,7 +33,7 @@ function defaultInstagramTypes(mediaKind?: string) {
 }
 
 export default function BufferPage() {
-  const { db, ready } = useStudioDb();
+  const { db, setDb, ready } = useStudioDb();
   const [bootstrap, setBootstrap] = useState<BufferBootstrapResponse>({
     configured: false,
     organizations: [],
@@ -51,9 +51,11 @@ export default function BufferPage() {
   const [scheduledAt, setScheduledAt] = useState("");
   const [selectedHashtagGroupId, setSelectedHashtagGroupId] = useState("");
   const [selectedAudioId, setSelectedAudioId] = useState("");
+  const [editingQueueItemId, setEditingQueueItemId] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const editorSectionRef = useRef<HTMLDivElement | null>(null);
 
   const pendingProjectId = typeof window !== "undefined" ? window.localStorage.getItem("hadith-studio-buffer-pending-project") : null;
   const pendingProject = db.projects.find((project) => project.id === pendingProjectId);
@@ -65,15 +67,121 @@ export default function BufferPage() {
   );
   const selectedHashtagGroup = hashtagGroups.find((group) => group.id === selectedHashtagGroupId);
   const selectedAudioAsset = audioAssets.find((asset) => asset.id === selectedAudioId);
+  const queuedItems = db.bufferQueue;
+  const editingQueueItem = queuedItems.find((item) => item.id === editingQueueItemId) || null;
+  const bootstrapChannelById = useMemo(() => new Map(bootstrap.channels.map((channel) => [channel.id, channel])), [bootstrap.channels]);
 
-  const postsByStatus = useMemo(() => {
+  const queueByStatus = useMemo(() => {
     return {
-      queue: bootstrap.posts.filter((post) => formatBufferStatus(post.status) === "queue"),
-      scheduled: bootstrap.posts.filter((post) => formatBufferStatus(post.status) === "scheduled"),
-      published: bootstrap.posts.filter((post) => ["sent", "published"].includes(formatBufferStatus(post.status))),
-      failed: bootstrap.posts.filter((post) => formatBufferStatus(post.status) === "failed")
+      draft: queuedItems.filter((item) => item.status === "draft"),
+      queue: queuedItems.filter((item) => item.status === "queue"),
+      scheduled: queuedItems.filter((item) => item.status === "scheduled"),
+      published: queuedItems.filter((item) => item.status === "published"),
+      failed: queuedItems.filter((item) => item.status === "failed")
     };
-  }, [bootstrap.posts]);
+  }, [queuedItems]);
+
+  function resolveQueueItemService(item: BufferQueueItem) {
+    const directService = item.service?.trim();
+    if (directService && directService.toLowerCase() !== "buffer") return directService;
+    const firstAccountId = item.accountIds[0];
+    const matchedChannel = firstAccountId ? bootstrapChannelById.get(firstAccountId) : null;
+    return matchedChannel?.service || "Buffer";
+  }
+
+  function resolveQueueItemPlatformType(item: BufferQueueItem) {
+    if (item.platformType) return item.platformType;
+    const service = resolveQueueItemService(item).toLowerCase();
+    if (service.includes("instagram")) return "post";
+    if (service.includes("youtube")) return "video";
+    return item.mediaKind || "image";
+  }
+
+  function resolveQueueItemMediaKind(item: BufferQueueItem) {
+    if (item.mediaKind) return item.mediaKind;
+    if (item.platformType === "video") return "video";
+    if (item.platformType === "image") return "image";
+    return "image";
+  }
+
+  function queueItemLabel(item: BufferQueueItem) {
+    if (item.platformLabel) return item.platformLabel;
+    const service = resolveQueueItemService(item).toLowerCase();
+    const platformType = resolveQueueItemPlatformType(item);
+    if (service.includes("instagram")) {
+      return `Instagram · ${platformType.charAt(0).toUpperCase() + platformType.slice(1)}`;
+    }
+    if (service.includes("youtube")) {
+      return `YouTube · ${platformType === "video" ? "Video" : platformType}`;
+    }
+    return resolveQueueItemService(item);
+  }
+
+  function queueItemSummary(item: BufferQueueItem) {
+    const channelCount = item.accountIds.length;
+    const channelLabel = channelCount > 1 ? `${channelCount} channels` : "1 channel";
+    const serviceLabel = queueItemLabel(item);
+    const scheduled = item.scheduledAt ? new Date(item.scheduledAt).toLocaleString() : "No schedule";
+    return `${serviceLabel} · ${channelLabel} · ${scheduled}`;
+  }
+
+  function queueItemMediaLabel(item: BufferQueueItem) {
+    const mediaKind = resolveQueueItemMediaKind(item);
+    return mediaKind.charAt(0).toUpperCase() + mediaKind.slice(1);
+  }
+
+  function queueItemUploadLabel(item: BufferQueueItem) {
+    if (item.fileName) {
+      const extension = item.fileName.split(".").pop()?.trim().toUpperCase();
+      if (extension) return extension;
+    }
+    const mediaKind = resolveQueueItemMediaKind(item);
+    return mediaKind === "video" ? "VIDEO" : "IMAGE";
+  }
+
+  function loadQueueItemForEdit(item: BufferQueueItem) {
+    const project = item.projectId ? db.projects.find((entry) => entry.id === item.projectId) : null;
+    const projectBuffer = project?.buffer;
+    setEditingQueueItemId(item.id);
+    setSelectedHashtagGroupId("");
+    setTitle(item.title || project?.title || "");
+    setCaption(item.caption || projectBuffer?.caption || project?.caption || project?.englishText || project?.arabicText || "");
+    setTags((item.tags || project?.hashtags || []).join(", "));
+    setCategory(projectBuffer?.category || projectBuffer?.mediaType || "");
+    setScheduledAt(item.scheduledAt ? new Date(item.scheduledAt).toISOString().slice(0, 16) : "");
+    const service = resolveQueueItemService(item).toLowerCase();
+    setSelectedChannelIds(
+      item.accountIds.length
+        ? item.accountIds
+        : bootstrap.channels.filter((channel) => channel.service.toLowerCase().includes(service.includes("youtube") ? "youtube" : "instagram")).map((channel) => channel.id)
+    );
+    setChannelSettings((current) => {
+      const next = { ...current };
+      for (const accountId of item.accountIds) {
+        const channel = bootstrapChannelById.get(accountId);
+        if (!channel) continue;
+        const channelService = channel.service.toLowerCase();
+        next[channel.id] = {
+          instagramTypes: channelService.includes("instagram")
+            ? [((resolveQueueItemPlatformType(item) || (projectBuffer?.mediaKind === "video" ? "reel" : "post")) as "post" | "story" | "reel")]
+            : undefined,
+          youtubeCategory: channelService.includes("youtube") ? (projectBuffer?.category || category) : undefined
+        };
+      }
+      return next;
+    });
+    setSuccess(`Loaded ${item.status} for editing.`);
+    window.setTimeout(() => {
+      editorSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
+  }
+
+  function openQueueItemEditor(item: BufferQueueItem, mode: "edit" | "schedule") {
+    loadQueueItemForEdit(item);
+    if (mode === "schedule" && !item.scheduledAt) {
+      setScheduledAt(new Date().toISOString().slice(0, 16));
+    }
+  }
 
   useEffect(() => {
     if (!pendingProject) return;
@@ -179,6 +287,81 @@ export default function BufferPage() {
     return bootstrap.channels.filter((channel) => selectedChannelIds.includes(channel.id));
   }
 
+  function saveQueueItemLocally(nextStatus: BufferQueueItem["status"]) {
+    if (!editingQueueItemId) return false;
+    const nextTitle = title.trim() || pendingProject?.title || "Buffer post";
+    const nextCaption = caption.trim() || pendingProject?.caption || pendingProject?.englishText || pendingProject?.arabicText || "";
+    const nextTags = tags
+      .split(/,|\n/)
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+    const nextScheduledAt = scheduledAt ? new Date(scheduledAt).toISOString() : undefined;
+    const nextChannels = selectedChannels();
+    const firstChannel = nextChannels[0];
+    const service = firstChannel?.service || editingQueueItem?.service || "Buffer";
+    const platformType =
+      service.toLowerCase().includes("instagram")
+        ? (channelSettings[firstChannel?.id || ""]?.instagramTypes?.[0] || (preparedMedia?.mediaKind === "video" ? "reel" : "post"))
+        : service.toLowerCase().includes("youtube")
+          ? "video"
+          : preparedMedia?.mediaKind || "image";
+    const platformLabel =
+      service.toLowerCase().includes("instagram")
+        ? `Instagram · ${platformType.charAt(0).toUpperCase() + platformType.slice(1)}`
+        : service.toLowerCase().includes("youtube")
+          ? `YouTube · ${channelSettings[firstChannel?.id || ""]?.youtubeCategory || category.trim() || "Video"}`
+          : service;
+
+    setDb((current) => ({
+      ...current,
+      bufferQueue: current.bufferQueue.map((item) =>
+        item.id === editingQueueItemId
+          ? {
+              ...item,
+              title: nextTitle,
+              caption: nextCaption,
+              tags: nextTags,
+              scheduledAt: nextStatus === "draft" ? undefined : nextScheduledAt || item.scheduledAt,
+              status: nextStatus,
+              accountIds: nextChannels.length ? nextChannels.map((channel) => channel.id) : item.accountIds,
+              service,
+              platformType: platformType as BufferQueueItem["platformType"],
+              platformLabel,
+              mediaKind: preparedMedia?.mediaKind,
+              mediaType: preparedMedia?.mediaType,
+              fileName: preparedMedia?.fileName
+            }
+          : item
+      ),
+      projects: current.projects.map((project) =>
+        project.id === (editingQueueItem?.projectId || pendingProject?.id)
+          ? {
+              ...project,
+              title: nextTitle,
+              caption: nextCaption,
+              hashtags: nextTags,
+              buffer: project.buffer
+                ? {
+                    ...project.buffer,
+                    title: nextTitle,
+                    caption: nextCaption,
+                    tags: nextTags,
+                    scheduledAt: nextScheduledAt,
+                    mediaKind: preparedMedia?.mediaKind || project.buffer.mediaKind,
+                    mediaType: preparedMedia?.mediaType || project.buffer.mediaType,
+                    fileName: preparedMedia?.fileName || project.buffer.fileName,
+                    category: category.trim() || project.buffer.category
+                  }
+                : project.buffer
+            }
+          : project
+      )
+    }));
+    setSuccess(nextStatus === "draft" ? "Draft updated." : "Scheduled locally.");
+    setEditingQueueItemId("");
+    return true;
+  }
+
   function formatDuration(duration?: number) {
     if (!duration || Number.isNaN(duration)) return "0.0s";
     return `${duration.toFixed(1)}s`;
@@ -199,36 +382,40 @@ export default function BufferPage() {
     }
     const nextCaption = caption.trim() || pendingProject?.caption || pendingProject?.englishText || pendingProject?.arabicText || "";
     const nextTitle = title.trim() || pendingProject?.title || "Buffer post";
+    if (editingQueueItemId) {
+      const updated = saveQueueItemLocally(saveToDraft ? "draft" : scheduledAt ? "scheduled" : "queue");
+      if (updated) return;
+    }
     setPublishing(true);
     setError("");
     setSuccess("");
     try {
-    const response = await fetch("/api/buffer/publish", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        organizationId,
-        channels: selectedChannels().map((channel) => ({
-          id: channel.id,
-          service: channel.service,
-          instagramTypes: channelSettings[channel.id]?.instagramTypes,
-          youtubeCategory: channelSettings[channel.id]?.youtubeCategory || category.trim() || preparedMedia.category
-        })),
-        title: nextTitle,
-        caption: nextCaption,
-        category: category.trim() || preparedMedia.category,
-        tags: tags
-          .split(/,|\n/)
-          .map((tag) => tag.trim())
-          .filter(Boolean),
-        scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
-        saveToDraft,
-        projectId: pendingProject?.id,
-        mediaUrl: preparedMedia.mediaUrl,
-        mediaKind: preparedMedia.mediaKind,
-        mediaType: preparedMedia.mediaType,
-        fileName: preparedMedia.fileName
-      })
+      const response = await fetch("/api/buffer/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organizationId,
+          channels: selectedChannels().map((channel) => ({
+            id: channel.id,
+            service: channel.service,
+            instagramTypes: channelSettings[channel.id]?.instagramTypes,
+            youtubeCategory: channelSettings[channel.id]?.youtubeCategory || category.trim() || preparedMedia.category
+          })),
+          title: nextTitle,
+          caption: nextCaption,
+          category: category.trim() || preparedMedia.category,
+          tags: tags
+            .split(/,|\n/)
+            .map((tag) => tag.trim())
+            .filter(Boolean),
+          scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : undefined,
+          saveToDraft,
+          projectId: pendingProject?.id,
+          mediaUrl: preparedMedia.mediaUrl,
+          mediaKind: preparedMedia.mediaKind,
+          mediaType: preparedMedia.mediaType,
+          fileName: preparedMedia.fileName
+        })
       });
       const payload = (await response.json()) as { ok: boolean; error?: string };
       if (!response.ok || !payload.ok) {
@@ -255,8 +442,9 @@ export default function BufferPage() {
   return (
     <RouteShell title="Buffer Dashboard" description="Select channels, queue posts, and inspect Buffer queue state.">
       <div className="grid gap-4 xl:grid-cols-3">
-        <Card className="border-[var(--panel-border)] bg-[#11161d] xl:col-span-1">
-          <CardHeader>
+        <div ref={editorSectionRef}>
+          <Card className="border-[var(--panel-border)] bg-[#11161d] xl:col-span-1">
+            <CardHeader>
             <CardTitle className="text-[var(--gold-soft)]">Queue post</CardTitle>
             <CardDescription>Choose channels, then queue or draft the post in Buffer.</CardDescription>
           </CardHeader>
@@ -394,6 +582,11 @@ export default function BufferPage() {
                 Selected audio: <span className="text-[#e8e8e8]">{selectedAudioAsset.name}</span> · {formatDuration(selectedAudioAsset.duration)}
               </div>
             ) : null}
+            {editingQueueItemId ? (
+              <div className="rounded-md border border-[#3b4d66] bg-[#0f1722] px-3 py-2 text-xs text-[#d5e4f7]">
+                Editing saved draft: {editingQueueItem?.title || "Buffer post"}. Use “Schedule Changes” to update the existing item instead of creating a duplicate.
+              </div>
+            ) : null}
             <Input placeholder="Category" value={category} onChange={(event) => setCategory(event.target.value)} />
             <Input type="datetime-local" value={scheduledAt} onChange={(event) => setScheduledAt(event.target.value)} />
             <div className="space-y-2 rounded-md border border-[var(--panel-border)] bg-[#0d1116] p-3">
@@ -473,17 +666,33 @@ export default function BufferPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               <Button onClick={() => publishToBuffer(false)} disabled={publishing || !bootstrap.configured}>
-                {publishing ? "Loading..." : "Queue Post"}
+                {publishing ? "Loading..." : editingQueueItemId ? "Schedule Changes" : "Queue Post"}
               </Button>
               <Button variant="secondary" onClick={() => publishToBuffer(true)} disabled={publishing || !bootstrap.configured}>
-                Save Draft
+                {editingQueueItemId ? "Update Draft" : "Queue Draft"}
               </Button>
+              {editingQueueItemId ? (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setEditingQueueItemId("");
+                    setTitle("");
+                    setCaption("");
+                    setTags("");
+                    setScheduledAt("");
+                  }}
+                  disabled={publishing}
+                >
+                  Cancel Edit
+                </Button>
+              ) : null}
             </div>
             <div className="text-xs text-[var(--text-dim)]">
               Optional fields: title, category, tags, schedule time. Buffer keeps the selected channels as separate queued posts.
             </div>
           </CardContent>
-        </Card>
+          </Card>
+        </div>
 
         <Card className="border-[var(--panel-border)] bg-[#11161d] xl:col-span-2">
           <CardHeader>
@@ -498,43 +707,99 @@ export default function BufferPage() {
               </div>
               <div className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-sm">
                 <div className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Drafts</div>
-                <div className="mt-1 text-lg font-semibold">{bootstrap.posts.filter((post) => formatBufferStatus(post.status) === "draft").length}</div>
+                <div className="mt-1 text-lg font-semibold">{queueByStatus.draft.length}</div>
               </div>
               <div className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-sm">
                 <div className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Queue</div>
-                <div className="mt-1 text-lg font-semibold">{postsByStatus.queue.length}</div>
+                <div className="mt-1 text-lg font-semibold">{queueByStatus.queue.length}</div>
               </div>
               <div className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-sm">
                 <div className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Scheduled</div>
-                <div className="mt-1 text-lg font-semibold">{postsByStatus.scheduled.length}</div>
+                <div className="mt-1 text-lg font-semibold">{queueByStatus.scheduled.length}</div>
               </div>
               <div className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-sm">
                 <div className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Published</div>
-                <div className="mt-1 text-lg font-semibold">{postsByStatus.published.length}</div>
+                <div className="mt-1 text-lg font-semibold">{queueByStatus.published.length}</div>
               </div>
               <div className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] px-3 py-2 text-sm">
                 <div className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Failed</div>
-                <div className="mt-1 text-lg font-semibold">{postsByStatus.failed.length}</div>
+                <div className="mt-1 text-lg font-semibold">{queueByStatus.failed.length}</div>
               </div>
             </div>
             {!ready || loading ? <div className="text-sm text-[var(--text-dim)]">Loading Buffer data…</div> : null}
-            <div className="space-y-3">
-              {bootstrap.posts.map((post) => (
-                <div key={post.id} className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] p-3 text-sm">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <div className="font-medium">{post.text.slice(0, 90)}</div>
-                      <div className="text-xs text-[var(--text-dim)]">
-                        {post.channelId} · {post.dueAt || "Queue"} · {post.createdAt ? new Date(post.createdAt).toLocaleString() : "Unknown"}
+            {queueByStatus.draft.length ? (
+              <div className="space-y-2">
+                <div className="text-xs uppercase tracking-[0.08em] text-[var(--text-dim)]">Drafts</div>
+                <div className="space-y-3">
+                  {queueByStatus.draft.map((item) => (
+                    <div key={item.id} className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] p-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-medium">{item.title}</div>
+                          <div className="text-xs text-[var(--text-dim)]">{queueItemSummary(item)}</div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Badge>{formatBufferStatus(item.status)}</Badge>
+                          <Badge className="border-[var(--panel-border)] bg-[#11161d] text-[#e8e8e8]">{queueItemLabel(item)}</Badge>
+                          <Badge className="border-[var(--panel-border)] bg-[#11161d] text-[#e8e8e8]">
+                            {queueItemMediaLabel(item)}
+                          </Badge>
+                          <Badge className="border-[var(--panel-border)] bg-[#11161d] text-[#e8e8e8]">
+                            Upload · {queueItemUploadLabel(item)}
+                          </Badge>
+                        </div>
+                      </div>
+                      {item.caption ? <div className="mt-2 line-clamp-2 text-xs text-[var(--text-dim)]">{item.caption}</div> : null}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" onClick={() => openQueueItemEditor(item, "edit")}>
+                          Edit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => openQueueItemEditor(item, "schedule")}
+                        >
+                          Schedule
+                        </Button>
                       </div>
                     </div>
-                    <Badge>{formatBufferStatus(post.status)}</Badge>
-                  </div>
+                  ))}
                 </div>
-              ))}
-              {!bootstrap.posts.length && !loading ? (
+              </div>
+            ) : null}
+                <div className="space-y-3">
+                  {queuedItems.filter((item) => item.status !== "draft").map((item) => (
+                    <div key={item.id} className="rounded-md border border-[var(--panel-border)] bg-[#0d1116] p-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="font-medium">{item.title}</div>
+                          <div className="text-xs text-[var(--text-dim)]">{queueItemSummary(item)}</div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Badge>{formatBufferStatus(item.status)}</Badge>
+                          <Badge className="border-[var(--panel-border)] bg-[#11161d] text-[#e8e8e8]">{queueItemLabel(item)}</Badge>
+                          <Badge className="border-[var(--panel-border)] bg-[#11161d] text-[#e8e8e8]">{queueItemMediaLabel(item)}</Badge>
+                          <Badge className="border-[var(--panel-border)] bg-[#11161d] text-[#e8e8e8]">
+                            Upload · {queueItemUploadLabel(item)}
+                          </Badge>
+                        </div>
+                      </div>
+                      {item.caption ? <div className="mt-2 line-clamp-2 text-xs text-[var(--text-dim)]">{item.caption}</div> : null}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" onClick={() => openQueueItemEditor(item, "edit")}>
+                          Edit
+                        </Button>
+                        {item.status !== "published" ? (
+                          <Button size="sm" variant="secondary" onClick={() => openQueueItemEditor(item, "schedule")}>
+                            {item.status === "scheduled" ? "Reschedule" : "Schedule"}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+              {!queuedItems.length && !loading ? (
                 <div className="rounded-lg border border-dashed border-[var(--panel-border)] bg-[#0d1116] px-4 py-8 text-sm text-[var(--text-dim)]">
-                  No Buffer posts loaded yet.
+                  No Buffer queue items saved yet.
                 </div>
               ) : null}
             </div>
